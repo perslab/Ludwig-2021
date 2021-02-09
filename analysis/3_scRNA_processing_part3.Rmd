@@ -1,0 +1,179 @@
+---
+title: "3_scRNA_processing_part3"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(Seurat)
+library(ggplot2)
+source("/projects/mludwig/Ludwig-2021/code/find_stable_clusters.R")
+library(doMC)
+registerDoMC(20)
+```
+
+# Load AP Seurat data
+```{r}
+AP <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj_tmp2.rds")
+```
+
+# Subset neurons
+```{r}
+neurons <- subset(AP, subset = cell.type == "Neurons")
+```
+
+# Clustering
+```{r, warning=FALSE}
+neurons <- ScaleData(object = neurons, verbose = FALSE)
+neurons <- RunPCA(object = neurons, npcs = 30, verbose = FALSE)
+neurons <- RunUMAP(object = neurons, reduction = "pca", 
+    dims = 1:30)
+```
+
+# Find the most stable major neuronal populations
+```{r}
+resolution <- seq(0.01, 0.1, 0.01)
+
+stability <- FindStableClustersSeurat(object = neurons, resolution = resolution, dims = 1:30)
+
+stability.sumstats <- data.frame(matrix(NA, nrow = length(resolution), ncol = 2))
+colnames(stability.sumstats) <- c("resolution", "silhouette")
+stability.sumstats$resolution <- resolution
+stability.sumstats$silhouette <- apply(stability, 2, mean)
+
+ggplot(stability.sumstats, aes(resolution, silhouette)) +
+  geom_point(size=2) +
+theme(axis.line = element_line(colour = "black"), panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), panel.border = element_blank(), 
+    panel.background = element_blank(), legend.position = "None") +
+  xlab("Resolution") + ylab("Silhouette index") 
+
+
+optimal.resolution <- stability.sumstats$resolution[which.max(stability.sumstats$silhouette)]
+
+neurons <- FindNeighbors(neurons, reduction = "pca", verbose = F)
+neurons <- FindClusters(neurons, resolution = optimal.resolution,
+                        verbose = F)
+
+neurons$cell.type <- neurons@meta.data[, paste0("integrated_snn_res.", optimal.resolution)]
+neurons$cell.type <- paste0("Neurons", (as.numeric(as.character(neurons$cell.type)) + 1))
+
+DimPlot(neurons, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+ xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Remove cells with low silhouette coefficient 
+```{r}
+neurons$silhouette <- stability[, which(colnames(stability) == optimal.resolution)]
+
+neurons$remove <- "No"
+neurons$remove[which(neurons$silhouette < 0)] <- "Yes"
+cell.id.remove <- colnames(neurons)[which(neurons$remove == "Yes")]
+
+DimPlot(neurons, reduction = "umap", label = T, group.by = "remove") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+neurons <- subset(neurons, subset = remove == "Yes", invert = T)
+
+neurons <- ScaleData(object = neurons, verbose = F) 
+neurons <- RunPCA(object = neurons, npcs = 30, verbose = F)
+neurons <- RunUMAP(object = neurons, reduction = "pca", 
+    dims = 1:10)
+
+DimPlot(neurons, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Find the most stable major neuronal populations
+```{r}
+resolution <- seq(0.01, 1, 0.01)
+
+stability <- FindStableClustersSeurat(object = neurons, resolution = resolution, dims = 1:30)
+
+stability.sumstats <- data.frame(matrix(NA, nrow = length(resolution), ncol = 2))
+colnames(stability.sumstats) <- c("resolution", "silhouette")
+stability.sumstats$resolution <- resolution
+stability.sumstats$silhouette <- apply(stability, 2, mean)
+
+ggplot(stability.sumstats, aes(resolution, silhouette)) +
+  geom_point(size=2) +
+theme(axis.line = element_line(colour = "black"), panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), panel.border = element_blank(), 
+    panel.background = element_blank(), legend.position = "None") +
+  xlab("Resolution") + ylab("Silhouette index") 
+
+
+optimal.resolution <- stability.sumstats$resolution[which.max(stability.sumstats$silhouette)]
+
+neurons <- FindNeighbors(neurons, reduction = "pca", verbose = F)
+neurons <- FindClusters(neurons, resolution = optimal.resolution,
+                        verbose = F)
+
+neurons$cell.subtype <- neurons@meta.data[, paste0("integrated_snn_res.", optimal.resolution)]
+neurons$cell.subtype <- paste0("Subtype", (as.numeric(as.character(neurons$cell.subtype)) + 1))
+neurons$silhouette <- stability[, which(colnames(stability) == optimal.resolution)]
+
+DimPlot(neurons, reduction = "umap", label = T, group.by = "cell.subtype") + 
+  theme(legend.position = "none") +
+ xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Clean AP Seurat object
+```{r}
+AP <- subset(AP, cells = cell.id.remove, invert = T)
+
+AP <- ScaleData(object = AP, verbose = F) 
+AP <- RunPCA(object = AP, npcs = 30, verbose = F)
+AP <- RunUMAP(object = AP, reduction = "pca", 
+    dims = 1:10)
+
+# Clean object
+AP@meta.data <- AP@meta.data[, c("nCount_RNA", "nFeature_RNA", "sample", "percent.mito",
+                             "percent.ribo", "predicted.id", "prediction.score",
+                             "clusters", "cell.type", "silhouette")]
+
+
+AP$cell.type <- factor(AP$cell.type, levels=c("Astrocytes", "Endothelial cells", 
+                                     "Ependymal cells", "Microglia", "Neurons",
+                                     "Oligodendrocytes", "OPCs", 
+                                     "Tanycyte-like cells", "VLMCs"))
+
+DimPlot(AP, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+```{r}
+saveRDS(AP, 
+     file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj.rds")
+```
+
+
+# Clean neurons Seurat object
+```{r}
+# Clean object
+neurons$cell.type <- factor(neurons$cell.type,
+                            levels = paste0("Neurons",
+                                            seq(1:length(unique(neurons$cell.type)))))
+
+neurons$cell.subtype <- factor(neurons$cell.subtype, 
+                               levels = paste0("Subtype",
+                                               seq(1,length(unique(neurons$cell.subtype)))))
+
+neurons@meta.data <- neurons@meta.data[, c("nCount_RNA", "nFeature_RNA", "sample", 
+                                           "percent.mito", "percent.ribo", "predicted.id",
+                                           "prediction.score", "cell.type", "silhouette",
+                                           "cell.subtype")]
+```
+
+```{r}
+saveRDS(neurons, 
+     file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_Seurat_obj.rds")
+```
+

@@ -1,0 +1,415 @@
+---
+title: "5_scATAC_processing_part1"
+author: "Mette Ludwig"
+date: "2021_02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, message = FALSE}
+library(SnapATAC)
+library(GenomicRanges)
+library(ggplot2)
+library(Signac)
+library(Seurat)
+library(EnsDb.Mmusculus.v79)
+library(doMC)
+library(cluster)
+library(scales)
+library(parallelDist)
+registerDoMC(20)
+```
+
+# Load data
+```{r}
+x.sp <- readRDS("/projects/mludwig/Ludwig-2021/output/SnapATAC_objects/AP_SnapATAC_obj.rds")
+AP <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj.rds")
+neurons <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_Seurat_obj.rds")
+x.sp@barcode <- gsub("-.*", "-1", x.sp@barcode) 
+rownames(x.sp@bmat) <- x.sp@barcode
+```
+
+# Compute gene activity scores
+```{r}
+# Extract gene coordinates from Ensembl 
+gene.coords <- genes(EnsDb.Mmusculus.v79, filter = ~ gene_biotype == "protein_coding")
+seqlevelsStyle(gene.coords) <- 'UCSC'
+genebody.coords <- keepStandardChromosomes(gene.coords, pruning.mode = 'coarse')
+genebodyandpromoter.coords <- Extend(x = gene.coords, upstream = 2000, downstream = 0)
+colnames(genebodyandpromoter.coords@elementMetadata)[2] <- "name"
+
+genes = rownames(AP@assays$RNA)
+genes.sel.gr = genebodyandpromoter.coords[which(genebodyandpromoter.coords$name %in% genes)];
+
+x.sp = createGmat(
+    obj=x.sp, 
+    genes=genes.sel.gr,
+    do.par=T,
+    num.cores=20)
+
+x.sp@barcode <- paste0(gsub("1", "", x.sp@barcode), x.sp@sample) 
+rownames(x.sp@bmat) <- x.sp@barcode
+
+saveRDS(x.sp, file = "/projects/mludwig/Ludwig-2021/output/SnapATAC_objects/AP_SnapATAC_obj_gmat.rds")
+```
+
+# Create Seurat object
+```{r}
+peaks <- x.sp@peak 
+regions <- paste(seqnames(peaks), paste(start(peaks), end(peaks), sep = "_"), sep = "_")
+pmat <- x.sp@pmat
+pmat <- t(pmat)
+colnames(pmat) <- x.sp@barcode
+rownames(pmat) <- regions 
+
+AP.peaks <- CreateSeuratObject(counts = pmat, assay = "peaks")
+AP.peaks <- RunTFIDF(AP.peaks)
+AP.peaks <- FindTopFeatures(AP.peaks)
+AP.peaks <- RunSVD(AP.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+
+AP.peaks <- RunUMAP(object = AP.peaks, reduction = 'lsi', dims = 1:30)
+
+AP.peaks$cluster <- x.sp@cluster
+
+DimPlot(AP.peaks, reduction = "umap", label = T, group.by = "cluster") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Transfer cell type labels from snRNA-seq data
+```{r}
+# Transfer labels from scRNA data
+gmat.use = t(x.sp@gmat)
+colnames(gmat.use) <- x.sp@barcode
+
+AP.peaks[["activity"]] <- CreateAssayObject(counts = gmat.use)  
+
+DefaultAssay(AP.peaks) <- "activity"
+AP.peaks <- NormalizeData(AP.peaks, assay = 'activity',
+                          normalization.method = 'LogNormalize',
+                          scale.factor = median(AP.peaks$nCount_activity))
+
+DefaultAssay(AP) <- "integrated"
+Idents(AP) = "cell.type"
+
+marker.genes <- c()
+marker.genes <- foreach(i = unique(AP$cell.type))  %dopar% {
+  
+  markers <- FindMarkers(AP, 
+                        ident.1 = i,
+                        test.use = "MAST", only.pos = T, 
+                        logfc.threshold = 0.25)
+  markers <- rownames(markers)[1:100]
+  list(markers)
+}
+marker.genes <- unlist(marker.genes)
+
+AP <- ScaleData(object = AP, verbose = F, features = marker.genes) 
+AP <- RunPCA(object = AP, npcs = 30, verbose = F, features = marker.genes)
+
+transfer.anchors <- FindTransferAnchors(reference = AP, query = AP.peaks,
+                                        reduction = 'cca', dims = 1:30, features = marker.genes)
+predictions <- TransferData(anchorset = transfer.anchors,
+                                 refdata = AP$cell.type,
+                                 weight.reduction = AP.peaks[['lsi']], dims = 1:30)
+
+AP.peaks$cell.type <- predictions$predicted.id
+AP.peaks$prediction.score <- predictions$prediction.score.max  
+
+DimPlot(AP.peaks, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+```{r}
+mean(AP.peaks$prediction.score)
+median(AP.peaks$prediction.score)
+```
+
+# Remove cells with low prediction score
+```{r}
+AP.peaks$remove <- "No"
+AP.peaks$remove[which(AP.peaks$prediction.score < 0.5)] <- "Yes"
+
+DimPlot(AP.peaks, reduction = "umap", label = T, group.by = "remove") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+# Remove cells with low predicition score
+AP.peaks <- subset(AP.peaks, subset = prediction.score < 0.5, 
+                invert = T)
+AP.peaks <- RunTFIDF(AP.peaks)
+AP.peaks <- FindTopFeatures(AP.peaks)
+AP.peaks <- RunSVD(AP.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+AP.peaks <- RunUMAP(object = AP.peaks, reduction = 'lsi', dims = 1:30)
+
+DimPlot(AP.peaks, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+dim(AP.peaks)
+```
+
+# Compute silhouette coefficent for all cells
+```{r}
+pc <- AP.peaks@reductions$lsi@cell.embeddings[,1:30]
+distance <- parDist(pc, method="euclidean")
+
+AP.peaks$id_num <-  match(AP.peaks$cell.type, sort(unique(AP.peaks$cell.type)))
+cluster.id <- as.numeric(as.character(AP.peaks$id_num))
+sil <- silhouette(x = cluster.id, dist = distance)
+
+AP.peaks$silhouette <- sil[,3]
+AP.peaks$remove <- "No"
+AP.peaks$remove[which(AP.peaks$silhouette < 0)] <- "Yes"
+
+DimPlot(AP.peaks, reduction = "umap", label = T, group.by = "remove") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+```
+
+# Remove cells with low silhouette
+```{r}
+AP.peaks <- subset(AP.peaks, subset = silhouette < 0, invert = T)
+
+AP.peaks <- RunTFIDF(AP.peaks)
+AP.peaks <- FindTopFeatures(AP.peaks)
+AP.peaks <- RunSVD(AP.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+AP.peaks <- RunUMAP(object = AP.peaks, reduction = 'lsi', dims = 1:30)
+
+DimPlot(AP.peaks, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+dim(AP.peaks)
+```
+
+# Subset neurons
+```{r}
+neurons.peaks <- subset(AP.peaks, subset = cell.type == "Neurons")
+neurons.peaks <- RunTFIDF(neurons.peaks)
+neurons.peaks <- FindTopFeatures(neurons.peaks)
+neurons.peaks <- RunSVD(neurons.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+neurons.peaks <- RunUMAP(object = neurons.peaks, reduction = 'lsi', dims = 1:30)
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "cluster") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+dim(neurons.peaks)
+```
+
+# Transfer major neuronal population labels from snRNA-seq data
+```{r}
+DefaultAssay(neurons.peaks) <- "activity"
+neurons.peaks <- NormalizeData(neurons.peaks, assay = 'activity',
+                          normalization.method = 'LogNormalize',
+                          scale.factor = median(neurons.peaks$nCount_activity))
+
+DefaultAssay(neurons) <- "integrated"
+Idents(neurons) = "cell.type"
+
+marker.genes <- c()
+marker.genes <- foreach(i = unique(neurons$cell.type))  %dopar% {
+  
+  markers <- FindMarkers(neurons, 
+                        ident.1 = i,
+                        test.use = "MAST", only.pos = T, 
+                        logfc.threshold = 0.25)
+  markers <- rownames(markers)[1:100]
+  list(markers)
+}
+marker.genes <- unlist(marker.genes)
+marker.genes <- na.omit(marker.genes)
+
+neurons <- ScaleData(object = neurons, verbose = F, features = marker.genes) 
+neurons <- RunPCA(object = neurons, npcs = 30, verbose = F, features = marker.genes)
+
+transfer.anchors <- FindTransferAnchors(reference = neurons, query = neurons.peaks,
+                                        reduction = 'cca', dims = 1:30, features = marker.genes)
+predictions <- TransferData(anchorset = transfer.anchors,
+                                 refdata = neurons$cell.type,
+                                 weight.reduction = neurons.peaks[['lsi']], dims = 1:30)
+
+neurons.peaks$cell.type <- predictions$predicted.id
+neurons.peaks$prediction.score <- predictions$prediction.score.max  
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Remove neurons with low prediction score
+```{r}
+neurons.peaks$remove <- "No"
+neurons.peaks$remove[which(neurons.peaks$prediction.score < 0.5)] <- "Yes"
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "remove") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+# Remove cells with low predicition score
+neurons.peaks <- subset(neurons.peaks, subset = prediction.score < 0.5, 
+                invert = T)
+neurons.peaks <- RunTFIDF(neurons.peaks)
+neurons.peaks <- FindTopFeatures(neurons.peaks)
+neurons.peaks <- RunSVD(neurons.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+neurons.peaks <- RunUMAP(object = neurons.peaks, reduction = 'lsi', dims = 1:30)
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+dim(neurons.peaks)
+```
+
+# Compute silhouette coefficent for neurons
+```{r}
+pc <- neurons.peaks@reductions$lsi@cell.embeddings[,1:30]
+distance <- parDist(pc, method="euclidean")
+
+neurons.peaks$id_num <-  match(neurons.peaks$cell.type, 
+                               sort(unique(neurons.peaks$cell.type)))
+cluster.id <- as.numeric(as.character(neurons.peaks$id_num))
+sil <- silhouette(x = cluster.id, dist = distance)
+
+neurons.peaks$silhouette <- sil[,3]
+neurons.peaks$remove <- "No"
+neurons.peaks$remove[which(neurons.peaks$silhouette < 0)] <- "Yes"
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "remove") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+```
+
+# Remove neurons with low silhouette
+```{r}
+# Remove cells with low predicition score
+neurons.peaks <- subset(neurons.peaks, subset = silhouette < 0, 
+                        invert = T)
+
+neurons.peaks <- RunTFIDF(neurons.peaks)
+neurons.peaks <- FindTopFeatures(neurons.peaks)
+neurons.peaks <- RunSVD(neurons.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+neurons.peaks <- RunUMAP(object = neurons.peaks, reduction = 'lsi', dims = 1:30)
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+dim(neurons.peaks)
+```
+
+# Transfer neuronal subpopulation labels from snRNA-seq data
+```{r}
+neurons.peaks <- NormalizeData(neurons.peaks, assay = 'activity',
+                          normalization.method = 'LogNormalize',
+                          scale.factor = median(neurons.peaks$nCount_activity))
+
+DefaultAssay(neurons) <- "integrated"
+Idents(neurons) = "cell.subtype"
+
+
+marker.genes <- c()
+marker.genes <- foreach(i = unique(neurons$cell.subtype))  %dopar% {
+  
+  markers <- FindMarkers(neurons, 
+                        ident.1 = i,
+                        test.use = "MAST", only.pos = T, 
+                        logfc.threshold = 0.25)
+  markers <- rownames(markers)[1:100]
+  list(markers)
+}
+marker.genes <- unlist(marker.genes)
+marker.genes <- na.omit(marker.genes)
+
+neurons <- ScaleData(object = neurons, verbose = F, features = marker.genes) 
+neurons <- RunPCA(object = neurons, npcs = 30, verbose = F, features = marker.genes)
+
+transfer.anchors <- FindTransferAnchors(reference = neurons, query = neurons.peaks,
+                                        reduction = 'cca', dims = 1:30, features = marker.genes)
+predictions <- TransferData(anchorset = transfer.anchors,
+                                 refdata = neurons$cell.subtype,
+                                 weight.reduction = neurons.peaks[['lsi']], dims = 1:30)
+
+neurons.peaks$cell.subtype <- predictions$predicted.id
+neurons.peaks$prediction.score <- predictions$prediction.score.max  
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "cell.subtype") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Remove neurons with low predictions score
+```{r}
+neurons.peaks$remove <- "No"
+neurons.peaks$remove[which(neurons.peaks$prediction.score < 0.5)] <- "Yes"
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "remove") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+# Remove cells with low predicition score
+neurons.peaks <- subset(neurons.peaks, subset = prediction.score < 0.5, 
+                invert = T)
+neurons.peaks <- RunTFIDF(neurons.peaks)
+neurons.peaks <- FindTopFeatures(neurons.peaks)
+neurons.peaks <- RunSVD(neurons.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+neurons.peaks <- RunUMAP(object = neurons.peaks, reduction = 'lsi', dims = 1:30)
+
+DimPlot(neurons.peaks, reduction = "umap", label = T, group.by = "cell.subtype") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+dim(neurons.peaks)
+```
+
+# Clean Seurat objects
+```{r}
+cell.id.remove <- colnames(AP.peaks)[(AP.peaks$cell.type == "Neurons" 
+                                   & !colnames(AP.peaks) %in% colnames(neurons.peaks))]
+
+AP.peaks <- subset(AP.peaks, cells = cell.id.remove, invert = T)
+AP.peaks@meta.data <- AP.peaks@meta.data[, c("nCount_peaks", "nFeature_peaks",
+                                            "cell.type", "silhouette",
+                                            "cluster")]
+AP.peaks$sample <- gsub(".*-", "", colnames(AP.peaks))
+
+AP.peaks <- RunTFIDF(AP.peaks)
+AP.peaks <- FindTopFeatures(AP.peaks)
+AP.peaks <- RunSVD(AP.peaks, assay = 'peaks', reduction.key = 'LSI_',
+               reduction.name = 'lsi', seed.use = 1)
+AP.peaks <- RunUMAP(object = AP.peaks, reduction = 'lsi', dims = 1:30)
+
+AP.peaks$cell.type <- factor(AP.peaks$cell.type, levels=c("Astrocytes", "Endothelial cells", 
+                                                          "Ependymal cells", "Microglia", "Neurons",
+                                                          "Oligodendrocytes", "OPCs", 
+                                                          "Tanycyte-like cells", "VLMCs"))
+DimPlot(AP.peaks, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+```{r}
+saveRDS(AP.peaks, 
+     file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_peaks_Seurat_obj_tmp1.rds")
+```
+
+```{r}
+neurons.peaks@meta.data <- neurons.peaks@meta.data[, c("nCount_peaks", "nFeature_peaks",
+                                                       "cell.type", "cell.subtype", "silhouette",
+                                                       "cluster")]
+neurons.peaks$sample <- gsub(".*-", "", colnames(neurons.peaks))
+
+neurons.peaks$cell.subtype <- factor(neurons.peaks$cell.subtype, 
+                                     levels = paste0("Subtype",seq(1:22)))
+neurons.peaks$cell.type <- factor(neurons.peaks$cell.type,
+                                  levels = paste0("Neurons",c(1:11)))
+
+saveRDS(neurons.peaks, 
+     file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_peaks_Seurat_obj_tmp1.rds")
+```
+

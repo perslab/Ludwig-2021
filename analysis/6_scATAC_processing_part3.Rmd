@@ -1,0 +1,156 @@
+---
+title: "6_scATAC_processing_part3"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(Signac)
+library(Seurat)
+library(JASPAR2018)
+library(TFBSTools)
+```
+
+# Load data
+```{r}
+AP.peaks <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_peaks_Seurat_obj_tmp1.rds")
+neurons.peaks <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_peaks_Seurat_obj_tmp1.rds")
+```
+
+# Load JASPAR motifs
+```{r}
+# Load known motif data
+pfm <- readRDS("/projects/mludwig/Ludwig-2021/data/gene_info/pfm.JASPAR2020.rds")
+
+TF.meta <- data.frame(matrix(NA, nrow = length(pfm), ncol = 3))
+colnames(TF.meta) <- c("motif", "TF", "Tf")
+
+for (i in 1:nrow(TF.meta)) {
+  TF.meta$motif[i] <- names(pfm@listData)[i]
+  TF.meta$TF[i] <- pfm@listData[[i]]@name
+}
+
+TF.meta$Tf <- paste0(substr(TF.meta$TF, 1, 1), 
+              tolower(substr(TF.meta$TF, 2, nchar(TF.meta$TF))))
+
+saveRDS(TF.meta, file = "/projects/mludwig/Ludwig-2021/data/gene_info/TF_metadata.rds")
+```
+
+# Compute motif accessibility using ChromVAR
+```{r}
+DefaultAssay(AP.peaks) <- "peaks"
+
+# Scan the DNA sequence of each peak for the presence of each motif
+motif.matrix <- CreateMotifMatrix(
+  features = StringToGRanges(rownames(AP.peaks), sep = c("-", "-")),
+  pwm = pfm,
+  genome = 'mm10',
+  sep = c("-", "-")
+)
+
+# Create a new motif object to store the results
+motif <- CreateMotifObject(data = motif.matrix, pwm = pfm)
+
+# Add the Motif object to the assay
+AP.peaks[['peaks']] <- AddMotifObject(object = AP.peaks[['peaks']],
+                                  motif.object = motif)
+
+AP.peaks <- RegionStats(object = AP.peaks, genome = BSgenome.Mmusculus.UCSC.mm10, sep = c("-", "-"))
+
+# Find overrepresented motifs
+AP.peaks <- RunChromVAR(AP.peaks, genome = BSgenome.Mmusculus.UCSC.mm10)
+DefaultAssay(AP.peaks) <- "chromvar"
+```
+
+# Compute motif accessibility for neurons
+```{r}
+DefaultAssay(neurons.peaks) <- "peaks"
+
+# Scan the DNA sequence of each peak for the presence of each motif
+motif.matrix <- CreateMotifMatrix(
+  features = StringToGRanges(rownames(neurons.peaks), sep = c("-", "-")),
+  pwm = pfm,
+  genome = 'mm10',
+  sep = c("-", "-")
+)
+
+# Create a new Mofif object to store the results
+motif <- CreateMotifObject(data = motif.matrix, pwm = pfm)
+
+# Add the Motif object to the assay
+neurons.peaks[['peaks']] <- AddMotifObject(object = neurons.peaks[['peaks']],
+                                  motif.object = motif)
+
+neurons.peaks <- RegionStats(object = neurons.peaks, genome = BSgenome.Mmusculus.UCSC.mm10, sep = c("-", "-"))
+
+# Find overrepresented motifs
+neurons.peaks <- RunChromVAR(neurons.peaks, genome = BSgenome.Mmusculus.UCSC.mm10)
+DefaultAssay(neurons.peaks) <- "chromvar"
+```
+
+# Compute motif accessibility for aggregated neurons (pseudo-bulk)
+```{r}
+bulk.neurons <- data.frame(matrix(NA, nrow=nrow(neurons.peaks@assays$peaks), 
+                              ncol = length(unique(neurons.peaks$cell.subtype)) * length(unique(neurons.peaks$sample))))
+rownames(bulk.neurons) <- rownames(neurons.peaks@assays$peaks)
+colnames(bulk.neurons) <- apply(expand.grid(unique(neurons.peaks$sample), levels(neurons.peaks$cell.subtype)), 1, paste, collapse="-")
+
+for (i in unique(neurons.peaks$sample)) {
+  for (j in unique(neurons.peaks$cell.subtype)) {
+   
+     idx <- which(neurons.peaks$sample == i & neurons.peaks$cell.subtype == j)
+    
+     if (length(idx) < 5) {
+       next
+     }
+     
+     peaks <- as.numeric(apply(neurons.peaks@assays$peaks@counts[, idx], 1, sum))
+
+    bulk.neurons[,paste(i, j, sep="-")] <- peaks 
+    } 
+}
+bulk.neurons <- bulk.neurons[, !(is.na(bulk.neurons[1,]))]
+
+bulk.neurons.peaks <- CreateSeuratObject(counts = bulk.neurons, assay = "peaks")
+bulk.neurons.peaks$sample <- gsub("-.*", "", colnames(bulk.neurons.peaks))
+bulk.neurons.peaks$cell.type <- gsub(".*-", "", colnames(bulk.neurons.peaks))
+bulk.neurons.peaks$treatment <- gsub("[0-9]", "", bulk.neurons.peaks$sample)
+bulk.neurons.peaks$treatment.celltype <- paste(bulk.neurons.peaks$treatment,
+                                               bulk.neurons.peaks$cell.type,
+                                               sep = "-")
+DefaultAssay(bulk.neurons.peaks) <- "peaks"
+
+# Scan the DNA sequence of each peak for the presence of each motif
+# Load motif data
+motif.matrix <- CreateMotifMatrix(
+  features = StringToGRanges(rownames(bulk.neurons.peaks), sep = c("-", "-")),
+  pwm = pfm,
+  genome = 'mm10',
+  sep = c("-", "-")
+)
+
+# Create a new Motif object to store the results
+motif <- CreateMotifObject(data = motif.matrix, pwm = pfm)
+
+# Add the Motif object to the assay
+bulk.neurons.peaks[['peaks']] <- AddMotifObject(object = bulk.neurons.peaks[['peaks']],
+                                  motif.object = motif)
+
+bulk.neurons.peaks <- RegionStats(object = bulk.neurons.peaks, 
+                                 genome = BSgenome.Mmusculus.UCSC.mm10, sep = c("-", "-"))
+
+# Find overrepresented motifs
+bulk.neurons.peaks <- RunChromVAR(bulk.neurons.peaks, genome = BSgenome.Mmusculus.UCSC.mm10)
+```
+
+```{r}
+saveRDS(AP.peaks, 
+     file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_peaks_Seurat_obj.rds")
+saveRDS(neurons.peaks, 
+        file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_peaks_Seurat_obj.rds")
+saveRDS(bulk.neurons.peaks, 
+        file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/bulk_neurons_peaks_Seurat_obj.rds")
+```

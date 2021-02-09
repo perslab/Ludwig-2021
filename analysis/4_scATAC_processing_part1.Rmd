@@ -1,0 +1,277 @@
+---
+title: "4_scATAC_processing_part1"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(SnapATAC)
+library(GenomicRanges)
+library(leiden)
+library(ggplot2)
+source("/projects/mludwig/Ludwig-2021/code/SnapATAC_update.R")
+source("/projects/mludwig/Ludwig-2021/code/find_stable_clusters.R")
+library(doMC)
+registerDoMC(20)
+```
+
+# Load data
+```{r}
+sample.names <- c("10V", "20W", "31S", "5S", "7W",
+                 "11V", "23V", "25V", "30S", "32V", 
+                 "33W", "34W", "37W", "39S", "40S")
+snap.files <- paste0(sample.names, "_possorted.snap")
+snap.files <- paste0("/scratch/mludwig/scATAC/objects/", snap.files)
+path.prefix <- "/data/sc-10x/data-runs/181015-perslab-ap_atac/"
+path.name <- c("181228_AP-atac-gradient_10V", "181228_AP-atac-gradient_20W",
+               "181228_AP-atac-gradient_31S", "190222_5S",
+                "190222_7W", "190222_11V", "190222_23V", "190222_25V",
+               "190222_30S", "190222_32V", "190222_33W", "190222_34W", 
+              "190222_37W", "190222_39S", "190222_40S")
+path.suffix <- "/outs/singlecell.csv"
+barcode.files <- paste0(path.prefix, path.name, path.suffix)
+
+# Create list of snap files
+x.sp.ls <- lapply(seq(snap.files), function(i){
+    createSnap(file=snap.files[i],
+        sample=sample.names[i])})
+names(x.sp.ls) <- sample.names
+barcode.ls <- lapply(seq(snap.files), function(i){
+  barcodes <- read.csv(barcode.files[i], head=TRUE)
+  # remove no barcode line
+  barcodes <- barcodes[2:nrow(barcodes),]
+  barcodes$logUMI <- log10(barcodes$passed_filters + 1)
+  barcodes$promoter_ratio <- (barcodes$promoter_region_fragment + 1) / 
+    (barcodes$passed_filters + 1)
+  barcodes})
+
+plots <- lapply(seq(snap.files), function(i){
+  p1 <- ggplot(barcode.ls[[i]], aes(x=logUMI, y=promoter_ratio)) + 
+    geom_point(size=0.3, col="grey") + theme_classic() +
+    ggtitle(sample.names[[i]]) + ylim(0, 1) + xlim(0, 6) + 
+    labs(x="log10(UMI)", y="promoter ratio") +
+    geom_hline(yintercept=0.15)
+  p1})
+plots
+```
+
+# Quality control
+```{r}
+cutoff.logUMI.low <- rep(3, 15)
+cutoff.logUMI.high <- rep(5, 15)
+cutoff.FRIP.low <- rep(0.15, 15)
+cutoff.FRIP.high <- rep(0.6, 15)
+barcode.ls <- lapply(seq(snap.files), function(i){
+  barcodes <- barcode.ls[[i]]
+  idx <- which(barcodes$logUMI >= cutoff.logUMI.low[i] & 
+              barcodes$logUMI <= cutoff.logUMI.high[i] & 
+              barcodes$promoter_ratio >= cutoff.FRIP.low[i] &
+              barcodes$promoter_ratio <= cutoff.FRIP.high[i])
+    barcodes[idx,]})
+
+x.sp.ls <- lapply(seq(snap.files), function(i){
+  barcodes <- barcode.ls[[i]]
+  x.sp <- x.sp.ls[[i]]
+  barcode.shared <- intersect(x.sp@barcode, barcodes$barcode)
+  x.sp <- x.sp[match(barcode.shared, x.sp@barcode),]
+  barcodes <- barcodes[match(barcode.shared, barcodes$barcode),]
+  x.sp@metaData <- barcodes
+  x.sp})
+names(x.sp.ls) <- sample.names
+x.sp.ls
+```
+
+```{r, warning=FALSE, message=FALSE}
+# combine two snap object
+x.sp <- Reduce(snapRbind, x.sp.ls)
+x.sp@metaData["sample"] <- x.sp@sample
+x.sp
+```
+
+
+```{r}
+# Add cell-by-bin matrix to existing snap object
+x.sp <- addBmatToSnap(x.sp, bin.size=5000, num.cores=20)
+# Matrix binarization
+x.sp <- makeBinary(x.sp, mat="bmat")
+
+# Bin filtration 
+#system("wget http://mitra.stanford.edu/kundaje/akundaje/release/blacklists/mm10-mouse/mm10.blacklist.bed.gz")
+
+black_list <- read.table("/projects/mludwig/Ludwig-2021/data/gene_info/mm10.blacklist.bed.gz")
+black_list.gr <- GRanges(
+  black_list[,1], 
+  IRanges(black_list[,2], black_list[,3])
+	)
+
+idy1 <- queryHits(findOverlaps(x.sp@feature, black_list.gr))
+idy2 <- grep("chrM|random|chrX|chrY|chrUn", x.sp@feature)
+idy <- unique(c(idy1, idy2))
+x.sp <- x.sp[,-idy, mat="bmat"]
+
+bin.cov <- log10(Matrix::colSums(x.sp@bmat)+1)
+hist(bin.cov[bin.cov > 0], 
+     xlab="log10(bin cov)", main="log10(Bin Cov)", 
+     col="lightblue", xlim=c(0, 5))
+bin.cutoff <- quantile(bin.cov[bin.cov > 0], 0.95)
+idy <- which(bin.cov <= bin.cutoff & bin.cov > 0)
+x.sp <- x.sp[, idy, mat="bmat"]
+```
+
+# Dimensionality reduction 
+```{r}
+x.sp <- runJDA(obj=x.sp, input.mat="bmat", 
+              bin.cov.zscore.lower=-2, bin.cov.zscore.upper=2,
+              pc.num=50, norm.method="normOVE", max.var=5000,
+              do.par=F, ncell.chunk=1000,
+              seed.use=10, tmp.folder = tempdir())
+
+# Determine statistically significant principal components
+plotDimReductElbow(
+    obj=x.sp, 
+    point.size=1.5,
+    point.shape=19,
+    point.color="red",
+    point.alpha=1,
+    pdf.file.name=NULL,
+    pdf.height=7,
+    pdf.width=7,
+    labs.title="PCA Elbow plot",
+    labs.subtitle=NULL
+    )
+
+plotDimReductPW(
+    obj=x.sp, 
+    pca.dims=1:50,
+    point.size=0.3,
+    point.color="grey",
+    point.shape=19,
+    point.alpha=0.6,
+    down.sample=5000,
+    pdf.file.name=NULL, 
+    pdf.height=7, 
+    pdf.width=7
+    )
+```
+
+# Clustering 
+```{r}
+# KNN graph construction
+x.sp <- runKNN(
+    obj=x.sp,
+    pca.dims=2:40,
+    weight.by.sd=TRUE,
+    k=15
+    )
+
+# Clustering 
+resolution <- seq(0.1, 1, 0.1)
+stability <- FindStableClustersSnapATAC(x.sp, resolution, dims = 2:40)
+
+ggplot(stability, aes(resolution, silhouette)) +
+  geom_point(size=2, shape=23) +
+  theme(axis.line = element_line(colour = "black"), panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), panel.border = element_blank(), 
+    panel.background = element_blank(), legend.position = "None") +
+  xlab("Resolution") + ylab("Silhouette index") 
+
+optimal.resolution <- stability$resolution[which.max(stability$silhouette)]
+
+x.sp <- runClusterRep(
+	obj=x.sp,
+	tmp.folder=tempdir(),
+	louvain.lib="leiden", resolution = optimal.resolution, seed.use = 10)
+```
+
+# Visualization
+```{r}
+# Non-linear dimentionality reduction
+x.sp <- runViz(
+	obj=x.sp, 
+	tmp.folder=tempdir(),
+	dims=2,
+	pca.dims=2:40, 
+	weight.by.sd=TRUE,
+	method="umap",
+	fast_tsne_path=NULL,
+	Y.init=NULL,
+	seed.use=10,
+	num.cores=20
+	)
+
+plotViz(
+	obj=x.sp, 
+	method="umap", 
+	point.size=0.5, 
+	point.shape=19, 
+	point.alpha=0.8, 
+	point.color="cluster", 
+	text.add=FALSE,
+	text.size=1.5,
+	text.color="black",
+	text.halo.add=TRUE,
+	text.halo.color="white",
+	text.halo.width=0.2,
+	down.sample=10000,
+	pdf.file.name=NULL,
+	pdf.width=7, 
+	pdf.height=7,
+	legend.add=TRUE
+	)
+```
+
+# Run peak calling on individual clusters
+```{r, message=FALSE, results="hide"}
+clusters <- unique(x.sp@cluster)
+
+foreach(i = 1:length(clusters)) %dopar% {
+  
+  set.seed(i)
+  
+  runMACS(
+	obj=x.sp[which(x.sp@cluster==i),], 
+	output.prefix=paste0("output/peaks/agg", i),
+	path.to.snaptools="/tools/anaconda/envs/mlf210/conda_py3.7/bin/snaptools",
+	path.to.macs="/tools/anaconda/envs/mlf210/conda_py3.7/bin/macs2",
+	gsize="mm", 
+	buffer.size=500, 
+	num.cores=1,
+	macs.options="--nomodel --shift 37 --ext 73 --qval 1e-2 -B --SPMR --call-summits",
+	tmp.folder=tempdir()
+	)
+}
+```
+
+# Store peak matrix
+```{r}
+peak.files <- list.files(path = "/projects/mludwig/Ludwig-2021/output/peaks/", 
+                         pattern ="narrowPeak", full.names = T)
+peak.list <- lapply(as.list(peak.files), function(x) read.table(x))
+peak.list <- lapply(peak.list, function(x) GRanges(x[,1], IRanges(x[,2], x[,3])))
+peaks.gr <- reduce(Reduce(c, peak.list))
+seqlevels(peaks.gr) <- gsub("'", "", gsub("b'", "", seqlevels(peaks.gr)))
+
+x.sp <- createPmat(
+  x.sp, 
+  peaks=peaks.gr,
+	ncell.chunk=20,
+	do.par=TRUE,
+	num.cores=20)
+
+x.sp@barcode <- paste0(gsub("1", "", x.sp@barcode), x.sp@sample) 
+rownames(x.sp@bmat) <- x.sp@barcode
+idx <- grep("random|chrUn", x.sp@peak)
+x.sp@peak <- x.sp@peak[-idx]
+x.sp@pmat <- x.sp@pmat[, -idx]
+```
+
+```{r}
+saveRDS(x.sp, 
+     file = paste0("/projects/mludwig/Ludwig-2021/output/SnapATAC_objects",
+                   "/AP_SnapATAC_obj.rds"))
+```
+
+

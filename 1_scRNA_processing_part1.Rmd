@@ -1,0 +1,267 @@
+---
+title: "1_scRNA_processing_part1"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(Seurat)
+library(DoubletFinder)
+library(ggplot2)
+library(dplyr)
+library(cluster)
+library(parallelDist)
+source("/projects/mludwig/Ludwig-2021/code/compute_sil.R")
+library(doMC)
+registerDoMC(20)
+```
+
+# Load data
+```{r}
+data.directory = "/nfsdata/data/sc-10x/data-runs/181015-perslab-ap/" 
+names = c("181015_21V", "181015_22S", "181217_APn1_6V", "181217_APn1_12W",
+          "181217_APn1_19S","181228_AP-rna-gradient_14V", 
+          "181228_AP-rna-gradient_20W", "181228_AP-rna-gradient_27W",
+          "181228_AP-rna-gradient_31S", "181228_AP-rna-gradient_36S",
+          "181228_AP-rna-wash_9V", "181228_AP-rna-wash_16W", "181228_AP-rna-wash_26S",
+          "190222_7W", "190222_37W", "190222_34W", "190222_39S", 
+          "190222_40S", "190222_23V", "190222_25V") 
+suffix = c("/outs/filtered_feature_bc_matrix")
+```
+
+# Create Seurat object
+```{r}
+sample <- gsub(".*_", "", names)
+metadata = c() 
+
+for (i in 1:length(names)){
+
+  data.path = paste(paste(data.directory, names[i], sep = ""), suffix, sep = "") 
+  data = Read10X(data.path)
+  colnames(data) = paste(sample[i], colnames(data), sep = "_")
+
+  metadata = c(metadata, rep(sample[i], ncol(data)))
+  
+  if (i == 1) {
+    AP.data = data
+  } 
+  else {
+    AP.data = cbind(AP.data, data)
+  }
+}
+
+metadata = data.frame(metadata)
+colnames(metadata) = "sample"
+rownames(metadata) = colnames(AP.data)
+
+AP <- CreateSeuratObject(counts = AP.data, meta.data = metadata)
+
+mito.genes <- grep(pattern = "^mt-", x = rownames(AP@assays$RNA@counts), value = TRUE)
+percent.mito <- Matrix::colSums(AP@assays$RNA@counts[mito.genes,])/Matrix::colSums(AP@assays$RNA@counts)
+
+ribo.genes <- grep(pattern = "^Rp", x = rownames(AP@assays$RNA@counts), value = TRUE)
+percent.ribo <- Matrix::colSums(AP@assays$RNA@counts[ribo.genes,])/Matrix::colSums(AP@assays$RNA@counts)
+
+# Save data to the Seurat object
+mito.ribo = as.data.frame(cbind(percent.mito, percent.ribo))
+colnames(mito.ribo) = c("percent.mito", "percent.ribo")
+
+AP <- AddMetaData(object = AP, metadata = mito.ribo)
+
+AP <- subset(AP, subset = percent.mito < .05)
+
+AP.list <- SplitObject(object = AP, split.by = "sample")
+```
+
+# Data normalization
+```{r}
+for(i in 1:length(AP.list)) {
+  AP.list[[i]] <- NormalizeData(object = AP.list[[i]], verbose = F)
+  AP.list[[i]] <- FindVariableFeatures(object = AP.list[[i]], 
+                                       selection.method = "vst", nfeatures = 2000, 
+                                       verbose = F)
+  AP.list[[i]] <- ScaleData(AP.list[[i]], vars.to.regress = "nCount_RNA", verbose = F)
+  AP.list[[i]] <- RunPCA(AP.list[[i]], npcs = 30, verbose = F)
+}  
+```
+
+# Doublet removal
+```{r}
+AP.list.wodoublets <- foreach(i = 1:length(AP.list)) %dopar% {
+  
+  set.seed(i)
+
+  # pK identification
+  sweep.res.list_AP <- paramSweep_v3(AP.list[[i]], PCs = 1:10, sct = F)
+  sweep.stats_AP <- summarizeSweep(sweep.res.list_AP, GT = F)
+  bcmvn_AP <- find.pK(sweep.stats_AP)
+  pK <- bcmvn_AP$pK[which.max(bcmvn_AP$BCmetric)]
+  pK <- as.numeric(as.character(pK))
+  
+  # Doublet removal 
+  nExp_poi <- round(0.035 * ncol(AP.list[[i]]@assays$RNA))
+  AP.list[[i]] <- doubletFinder_v3(AP.list[[i]], PCs = 1:10, pN = 0.2, pK = pK, 
+                                 nExp = nExp_poi, reuse.pANN = F, sct = F)
+  
+  
+  colnames(AP.list[[i]]@meta.data)[7:8] <- c("pANN", "classifications")
+  AP.wodoublets <- subset(AP.list[[i]], subset = classifications == "Singlet")
+  list(AP.wodoublets)
+}
+AP.list.wodoublets <- unlist(AP.list.wodoublets)
+
+names(AP.list.wodoublets) <- names(AP.list)
+```
+
+# Data integration
+```{r, message=FALSE}
+for (i in 1:length(AP.list.wodoublets)) {
+ AP.list.wodoublets[[i]] <- NormalizeData(object = AP.list.wodoublets[[i]], verbose = F)
+ AP.list.wodoublets[[i]] <- FindVariableFeatures(object = AP.list.wodoublets[[i]],
+                                                 selection.method = "vst", 
+                                                 nfeatures = 2000, verbose = F)
+}
+
+# Integration
+AP.anchors <- FindIntegrationAnchors(object.list = AP.list.wodoublets, 
+                                     dims = 1:30, anchor.features = 2000)
+AP <- IntegrateData(anchorset = AP.anchors, dims = 1:30)
+```
+
+# Visualization
+```{r, warning=FALSE}
+# Run the standard workflow for visualization and clustering
+AP <- ScaleData(object = AP, verbose = F) 
+AP <- RunPCA(object = AP, npcs = 30, verbose = F)
+AP <- RunUMAP(object = AP, reduction = "pca", 
+    dims = 1:10)
+```
+
+# Clustering
+```{r, warning=FALSE}
+AP <- FindNeighbors(object = AP, reduction = "pca")
+AP <- FindClusters(object = AP, resolution = 0.1, verbose = F)
+AP <- FindClusters(object = AP, resolution = 0.2, verbose = F)
+AP <- FindClusters(object = AP, resolution = 0.3, verbose = F)
+
+DimPlot(AP, reduction = "umap", label = T, group.by = "integrated_snn_res.0.3") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+saveRDS(AP, 
+     file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj_tmp0.rds")
+```
+
+# Load and preprocess ARH-ME data (Campbell et al.)
+```{r}
+# Load count matrix
+campbell.counts <- readRDS("/projects/mludwig/Ludwig-2021/data/pub_others/campbell/campbell_counts.rds")
+
+# Initialize a Seurat object
+campbell <- CreateSeuratObject(counts = campbell.counts)
+
+# Add cell type information to Seurat object
+campbell.meta <- readRDS("/projects/mludwig/Ludwig-2021/data/pub_others/campbell/campbell_metadata.rds")
+
+
+campbell.meta <- campbell.meta[, c("cell_id", "cell_type_all_lvl1")]
+colnames(campbell.meta) <- c("cell.id", "cell.type")
+campbell.meta <- data.frame(apply(campbell.meta, 2, as.character), stringsAsFactors=FALSE)
+campbell$cell.id <- rownames(campbell@meta.data)
+campbell.meta <- left_join(campbell@meta.data, campbell.meta, by="cell.id")
+campbell$cell.type <- campbell.meta$cell.type
+
+# Remove cells without cell type label
+campbell <- subset(campbell, subset = cell.type %in% c("miss", "a19.ParsTuber1", "a20.ParsTuber2"), invert=T)
+
+# Normalize data
+campbell <- NormalizeData(object = campbell, verbose = F)
+
+Idents(object = campbell) = "cell.type"
+
+marker.genes <- c()
+marker.genes <- foreach(i = unique(campbell$cell.type))  %dopar% {
+  
+  markers <- FindMarkers(campbell, 
+                        ident.1 = i,
+                        test.use = "MAST", only.pos = T, 
+                        logfc.threshold = 0.25)
+  markers <- rownames(markers)[1:100]
+  list(markers)
+}
+marker.genes <- unlist(marker.genes)
+
+campbell <- ScaleData(object = campbell, verbose = F, features = marker.genes) 
+campbell <- RunPCA(object = campbell, npcs = 30, verbose = F, features = marker.genes)
+```
+
+# Project labels from ARH-ME to AP
+```{r}
+anchors <- FindTransferAnchors(reference = campbell, query = AP, 
+                               dims = 1:30, project.query = T, verbose = F, 
+                               features = marker.genes)
+predictions <- TransferData(anchorset = anchors, refdata = campbell$cell.type, 
+                            dims = 1:30, verbose = F)
+
+AP$predicted.id <- predictions$predicted.id
+AP$prediction.score <- predictions$prediction.score.max
+
+DimPlot(AP, reduction = "umap", label = F, group.by = "predicted.id") + 
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Label microglia
+```{r}
+AP$clusters <- as.numeric(as.character(AP$integrated_snn_res.0.3))
+
+# Define microglia cluster
+AP$clusters[which(AP$predicted.id == "a07.PVMMicro" &
+                               AP$prediction.score >= 0.5)] <- 20
+
+major.cell.type <- c("Astrocytes", "Neurons", "Neurons", "Neurons", "Oligodendrocytes", 
+                     "Neurons", "Neurons", "Neurons","Neurons", "Neurons",
+                     "Neurons", "Neurons", "Neurons", "Neurons", "OPCs",
+                     "Ependymal cells", "Tanycyte-like cells", "Endothelial cells", 
+                     "VLMCs", "Astrocytes", "Microglia")
+
+AP$cell.type <- major.cell.type[(AP$clusters + 1)]
+
+```
+
+# Compute silhouette coefficient
+```{r}
+pc <- AP@reductions$pca@cell.embeddings[,1:30]
+distance <- parDist(pc, method="euclidean")
+cluster.id <- AP$cell.type
+sil <- compute.sil(x = cluster.id, dist = distance)
+
+AP$silhouette <- sil
+AP$remove <- "No"
+AP$remove[which(AP$silhouette < 0)] <- "Yes"
+
+
+DimPlot(AP, reduction = "umap", label = T, group.by = "remove") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+# Remove cells with low silhouette coefficient 
+```{r}
+AP <- subset(AP, subset = remove == "Yes", invert = T)
+
+AP <- ScaleData(object = AP, verbose = F) 
+AP <- RunPCA(object = AP, npcs = 30, verbose = F)
+AP <- RunUMAP(object = AP, reduction = "pca", 
+    dims = 1:10)
+
+DimPlot(AP, reduction = "umap", label = T, group.by = "cell.type") + 
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2")
+```
+
+```{r}
+saveRDS(AP,
+        file = "/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj_tmp1.rds")
+```

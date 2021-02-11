@@ -1,0 +1,662 @@
+---
+title: "figure4"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(reshape2)
+library(stats)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggraph)
+library(dplyr)
+library(igraph)
+library(WGCNA)
+library(readxl)
+library(DESeq2)
+library(gProfileR)
+library(Seurat)
+library(tidygraph)
+library(cowplot)
+library(forcats)
+library(stringr)
+library(lmtest)
+library(rlist)
+library(openxlsx)
+library(plotrix)
+```
+
+# Load data
+```{r}
+# Bulk WGCNA data 
+network <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_network.rds")
+MEs <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_MEs.rds")
+expr.mat <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_exprmat.rds")
+gene.assignment <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_gene_assignment.rds")
+
+# snRNA-seq neuron Seurat object
+neurons <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_Seurat_obj.rds")
+
+# Neuronal population annotation
+neuron.type.info <- readRDS("/projects/mludwig/Ludwig-2021/output/AUCell/neuron_type_info.rds")
+neurons$cell.subtype2 <- neuron.type.info$cell.type2[match(neurons$cell.subtype,
+                                                           neuron.type.info$cell.type)]
+neurons$cell.subtype2 <- factor(neurons$cell.subtype2, 
+                                      levels = neuron.type.info$cell.type2)
+```
+
+# Find GLP-1RA associated modules
+```{r}
+# Semaglutide vs. weight-matched controls
+samples.sub <- rownames(MEs)[grep("Semaglutide|WM", rownames(MEs))]
+
+treatment <- gsub("AP_", "", samples.sub)
+treatment <- gsub(" .*", "", treatment)
+
+treatment <- factor(treatment, levels = c("WM", "Semaglutide"))
+
+MEs.sub <- MEs[samples.sub, !(colnames(MEs) == paste0("M", ncol(MEs)))]
+
+p.value <- data.frame(matrix(NA, nrow = 1, ncol = ncol(MEs.sub)))
+colnames(p.value) <- colnames(MEs.sub)
+
+for (i in 1:ncol(MEs.sub)) {
+  
+  module.eigengene <- MEs.sub[, i]
+  
+  # Logistic regression
+  model1 <- glm(treatment ~ module.eigengene, family = "binomial", 
+                control = list(maxit = 50))
+  model2 <- glm(treatment ~ 1, family = "binomial", control = list(maxit = 50))
+  
+  # Likelihood ratio test
+  lrtest <- lrtest(model1, model2)
+  p.value[,i] <- lrtest$Pr[2]
+  
+}
+
+# Adjust for multiple testing
+fdr.value <- p.adjust(unlist(p.value), method = "bonferroni")
+dim(fdr.value) <- dim(p.value)
+dimnames(fdr.value) <- dimnames(p.value)
+```
+
+# Fig. 4a
+```{r}
+# Modules with altered expression after semaglutide treatment
+sig.modules <- colnames(fdr.value)[which(fdr.value < 0.05)]
+module.expr <- MEs[, which(colnames(MEs) %in% sig.modules)]
+
+# Treatment groups
+module.expr$treatment <- gsub(" .*", "", gsub("AP_","", rownames(module.expr)))
+module.expr$treatment <- gsub("WM", "Weight-matched", module.expr$treatment)
+module.expr <- module.expr[which(module.expr$treatment %in% c("Semaglutide", "Weight-matched")),]
+
+# Prepare data for plotting
+module.expr.long <- melt(module.expr, id.vars = c("treatment")) 
+colnames(module.expr.long) <- c("treatment", "module", "ME")
+module.expr.long$treatment <- factor(module.expr.long$treatment,
+                                levels = c("Semaglutide", "Weight-matched"))
+module.expr.long$module <- factor(module.expr.long$module, levels = paste0("M", sort(as.numeric((gsub("M", "", sig.modules))), decreasing = F)))
+
+
+# Colors
+pal <- c("#C27D38", "#BFBFBA")
+
+# P-value position
+asterisk.position <- c()
+for (i in levels(module.expr.long$module)) {
+  asterisk.position <- c(asterisk.position, 
+                         max(module.expr.long$ME[which(module.expr.long$module == i)]))
+}
+
+
+# Plot
+pd <- position_dodge(0.1)
+module.expr.plot <- ggplot(module.expr.long, aes(x = module, y = ME, fill=treatment)) +
+  geom_boxplot(notch = F, size = 0.3, outlier.shape = NA,
+               position = position_dodge(0.6), width = 0.5) +
+    theme_pubr(legend = "top") +
+    theme(panel.border = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black", size = 0.4),
+          axis.title.y = element_text(size=6, face="bold"),
+          axis.text = element_text(size=6, face="bold"),
+          legend.text = element_text(size=6, face="bold"),
+          legend.title = element_blank(), 
+          legend.key.height = unit(0.1, "cm"),
+          legend.key.width = unit(0.2, "cm"),
+          plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+     guides(fill=guide_legend(title="Treatment")) +
+      scale_fill_manual(values = pal) +
+     scale_y_continuous(name = "Scaled module expression", limits = c(-0.4, 0.5), 
+                       breaks = seq(-0.4, 0.4, 0.2)) +
+    scale_x_discrete(name = "", labels = levels(module.expr.long$module)) +
+      geom_hline(yintercept = 0, linetype = "dashed", size = 0.3) +
+  geom_signif(y_position=c(0.05+asterisk.position), xmin=c(0.85, 1.85, 2.85, 3.85), 
+              xmax=c(1.15, 2.15, 3.15, 4.15), tip_length = 0.02, 
+              fontface = "bold", 
+              annotation = c("'2x10'^-8", "'2x10'^-8", 
+                             "'2x10'^-4", "'8x10'^-5"),
+              size = 0.2, textsize = 1.55, parse= T, hjust = 0.4) 
+module.expr.plot
+```
+
+# Fig. 4b
+```{r}
+# Load CELLEX values
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram3.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+cellex <- cellex[which(rownames(cellex) %in% colnames(expr.mat)),]
+
+
+# Matrix to store cell type specificity p-values
+n.cell.types <- ncol(cellex)
+p.values <- matrix(NA, length(sig.modules), n.cell.types) 
+rownames(p.values) <- sig.modules
+colnames(p.values) <- colnames(cellex)
+
+# Loop over modules to compute cell type specificity
+for (i in sig.modules) {
+  for (j in 1:ncol(cellex)) {
+    
+    all.genes <- intersect(rownames(cellex), colnames(expr.mat))
+    module.genes <- all.genes[which(all.genes %in% network[[i]])] 
+    cell.type.genes <- rownames(cellex)[which(cellex[, j] > 0)]
+    
+    overlap <- intersect(module.genes, cell.type.genes)
+    a <- length(overlap)
+    b <- length(cell.type.genes) - length(overlap)
+    c <- length(module.genes) - length(overlap)
+    d <- length(all.genes) - a - b - c
+      
+    con.table <- matrix(c(a, b, c, d), nrow = 2)
+    
+    fisher.p <- fisher.test(con.table, alternative = "greater")[["p.value"]]
+    p.values[i, j] <- fisher.p
+  } 
+}
+
+# Multiple testing adjustment
+module.enrich <- p.adjust(p.values, method = "bonferroni")
+dim(module.enrich) <- dim(p.values)
+dimnames(module.enrich) <- dimnames(p.values)
+
+# Prepare data for plotting 
+module.enrich <- melt(module.enrich)
+colnames(module.enrich) <- c("module", "cell.type", "p.adj")
+module.enrich$cell.type <- gsub("\\.", " ", module.enrich$cell.type)
+module.enrich$cell.type <- gsub("Tanycyte like cells", "Tanycyte-like cells", module.enrich$cell.type)
+module.enrich$cell.type2 <- factor(module.enrich$cell.type,
+                                        levels = c("Astrocytes", "Endothelial cells", 
+                                                   "Ependymal cells", "Microglia", 
+                                                    "Oligodendrocytes", "OPCs", 
+                                                    "Tanycyte-like cells", "VLMCs",
+                                                    neuron.type.info$cell.type2))
+module.enrich$cell.type2[which(module.enrich$cell.type %in% 
+                                 neuron.type.info$cell.type)] <-
+  neuron.type.info$cell.type2[na.omit(match(module.enrich$cell.type,
+                                            neuron.type.info$cell.type))]
+module.enrich$size <- -log10(module.enrich$p.adj)
+module.enrich$size[which(module.enrich$size < -log10(0.05))] <- NA
+module.enrich$module <- factor(module.enrich$module, 
+                               levels = rev(sig.modules))
+
+
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2, 
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area)] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area)] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area)] <- 1
+brain.area <- rbind(data.frame(cell.type2 = levels(module.enrich$cell.type2)[1:8], 
+                               AP = 1, NTS = NA, DMV = NA), brain.area)
+brain.area$NTS[which(brain.area$cell.type2 %in% 
+                       c("Astrocytes", "Microglia", "OPCs", "Oligodendrocytes"))] <- 1
+brain.area$DMV[which(brain.area$cell.type %in%
+                       c("Astrocytes", "Microglia", "OPCs", "Oligodendrocytes"))] <- 1
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("DMV", "NTS", "AP"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = c("Astrocytes", "Endothelial cells", 
+                                           "Ependymal cells", "Microglia", 
+                                           "Oligodendrocytes", "OPCs", 
+                                           "Tanycyte-like cells", "VLMCs",
+                                           neuron.type.info$cell.type2))
+
+# Plot 
+module.enrich.plot <- ggplot(module.enrich, aes(x = cell.type2, y = module, color = module)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size)) + 
+  scale_size(name = expression(paste(bold(-log[10]),bold("("),
+                                     bolditalic("P"),bold(")"))), 
+             breaks = c(5, 15, 25),
+             range = c(0, 5), limits = c(0, 32)) + 
+  theme_pubr(legend = "top") + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_blank(), 
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.title = element_text(size=6, face="bold"), 
+        legend.text = element_text(size=6, face="bold"),
+        legend.key.width = unit(-0.05, "cm"),
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.ticks.x = element_blank(),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0.5), "cm")) +
+  scale_color_manual(values= c("#8A843E", "#73BCC9", "#CC8B93", "#025666"), guide = F)
+
+
+brain.area.plot <- ggplot(brain.area, aes(x = cell.type2, y = area)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size), shape = 15, color = "grey60") + 
+  scale_size(range = c(0,2)) +
+  scale_color_manual(values = "black") +
+  theme_pubr() + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6, face="bold"), 
+        legend.position = "none",
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.text = element_text(size=6, face="bold"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0.5), "cm"))
+
+cell.type.enrichment.plot <- plot_grid(module.enrich.plot + 
+                                         theme(legend.position = "none"),  
+                                       brain.area.plot, align = "v", axis = "rl", 
+          ncol = 1, rel_heights = c(0.9,1.2))
+
+cell.type.enrichment.plot
+```
+
+# Fig. 4c
+```{r}
+# Compute network kme values
+kme <- signedKME(as.matrix(expr.mat), MEs, 
+                outputColumnName = substr(colnames(MEs), 1, 2))
+
+module <- "M1"
+module.genes <- rownames(gene.assignment)[gene.assignment$module == module]
+kmes <- kme[module.genes, module]
+query <- hub.genes <- module.genes[order(kmes, decreasing=T)]
+
+module.GO.terms <- gprofiler(query = query, 
+                             organism = "mmusculus", max_set_size = 500, 
+                             src_filter = c("GO:BP", "GO:MF"), 
+                             hier_filtering = "strong",
+                             ordered_query = T, correction_method = "bonferroni", 
+                             min_isect_size = 3,
+                             significant = F, custom_bg = colnames(expr.mat))
+      
+module.GO.terms$term.name <- gsub("transcription factor activity, RNA polymerase II proximal promoter sequence-specific DNA binding", "transcription factor activity", module.GO.terms$term.name)
+
+# Top 5 GO terms
+module.GO.terms <- module.GO.terms %>% select(domain, term.name, p.value, overlap.size) %>% 
+  arrange(p.value) %>% top_n(5, -p.value) %>%
+  mutate(x = fct_reorder(str_to_title(str_wrap(term.name, 20)), -p.value)) %>% 
+  mutate(y = -log10(p.value)) 
+
+# Plot
+GO.plot <- ggplot(module.GO.terms, aes(x,y)) + 
+  geom_col(colour="black", width=0.6, fill="#025666", size=0.3, position = position_dodge(width=0.5)) +
+  theme_pubr(legend="none") + 
+  theme(axis.text.x = element_text(size=6, face="bold"),
+        axis.text.y = element_text(size=6, face="bold"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.line = element_line(colour = "black", size = 0.4),
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  scale_size(range = c(5,10)) + 
+  ggsci::scale_fill_lancet() +
+  coord_flip() +
+  xlab(NULL) + ylab(expression(paste(bold(-log[10]),bold("("),
+                                     bolditalic("P"),bold(")")))) 
+  
+GO.plot
+```
+
+# Fig. 4d
+```{r}
+# Compute network adjacency
+adjacency <- adjacency(expr.mat, power = 5, corFnc = "bicor", type = "signed")
+
+# Load bulk RNA-seq data from the AP
+path <- "/projects/mludwig/Ludwig-2021/data/bulk/GUS2016-142-NN_Tables.xlsx"
+sheetnames <- excel_sheets(path)
+sheets <- lapply(excel_sheets(path), read_excel, path = path)
+names(sheets) <- sheetnames
+counts <- sheets[[2]]
+idx.dup <- which(duplicated(counts$`Gene name`)) # Indices of duplicated gene names
+AP.bulk <- counts[-idx.dup, grep("AP", colnames(counts))]
+AP.bulk <- as.matrix(AP.bulk)
+rownames(AP.bulk) <- counts$`Gene name`[-idx.dup]
+
+# Differential gene expression 
+count.data <- AP.bulk[,c(grep("Semaglutide", colnames(AP.bulk)), 
+                        grep("WM", colnames(AP.bulk)))]
+
+condition <- factor(c(rep('sema', length(grep("Semaglutide", colnames(count.data)))),
+                     rep('WM', length(grep("WM", colnames(count.data))))), 
+                   levels = c("WM", "sema"))
+dds <- DESeqDataSetFromMatrix(count.data, DataFrame(condition), ~ condition)
+dds <- DESeq(dds)
+DEGs <- results(dds, name="condition_sema_vs_WM") 
+
+# Prepare data for plotting
+size <- 30
+module <- "M1"
+
+module.genes <- rownames(gene.assignment)[gene.assignment$module == module]
+kmes <- kme[module.genes, module]
+hub.genes <- module.genes[order(kmes, decreasing=T)][1:size]
+hub.kmes <- kmes[order(kmes, decreasing=T)][1:size]
+hub.data <- cbind.data.frame(module = rep(module, size),
+                           gene = hub.genes, kme = hub.kmes)
+
+hub.data$logfc <- DEGs$log2FoldChange[match(hub.data$gene, rownames(DEGs))]
+hub.data$p.adj <- DEGs$padj[match(hub.data$gene, rownames(DEGs))]
+
+gene.idx <- match(hub.data$gene, colnames(expr.mat))
+
+adjacency[gene.idx, gene.idx] %>% 
+graph.adjacency(mode = "undirected", weighted = T, diag = FALSE) %>% 
+as_tbl_graph() %>% upgrade_graph() %>% activate(nodes) %>%
+dplyr::mutate(module = hub.data$module) %>%
+dplyr::mutate(kme = hub.data$kme) %>% 
+dplyr::mutate(abs.logfc = abs(hub.data$logfc)) %>%
+dplyr::mutate(p.adj = hub.data$p.adj) %>% 
+dplyr::mutate(color=factor(ifelse(p.adj < 0.05, yes = "S", no = "NS"), 
+                           levels = c("NS", "S"))) %>%
+activate(edges) %>% dplyr::filter(weight>.15) %>% activate(nodes) %>%
+filter(!node_is_isolated()) -> hub.plot
+
+# Plot
+module.plot <- ggraph(hub.plot, layout = "stress") + 
+  geom_edge_link(color="darkgrey", show.legend=F, aes(alpha=weight)) + 
+  geom_node_point(aes(size = abs.logfc), fill = "#025666", shape=21, alpha=0.8,
+                  stroke = 0) + 
+  scale_size(breaks = c(1,2,3), limits = c(0,4), range = c(0, 8), 
+             labels = c(" \U00B1 1", " \U00B1 2", " \U00B1 3")) +
+  geom_node_text(aes(label = name), fontface="bold.italic", size=2, repel = T, color = "black") +
+  guides(size = guide_legend(override.aes = list(size=c(2,4,6)), 
+                             keywidth = 0.8, 
+                             keyheight = 0.8, order = 1, 
+                             title = expression(bold(paste("Log"[2],~
+                                                             "fold-change"))))) + 
+  theme_graph(base_family = 'Helvetica') + 
+  theme(legend.title.align=0.5,
+        legend.position = "top",
+        legend.margin = margin(0, 0, 0, 0.5, unit="cm"),
+        legend.title = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        axis.text =element_blank(),
+        axis.ticks = element_blank(), 
+        axis.line=element_blank(),
+        axis.title = element_blank(),
+        legend.spacing.x = unit(0, "cm"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0.5), "cm")) +
+  coord_cartesian(clip="off")
+module.plot
+```
+
+# Fig. 4e
+```{r}
+# Generate pseudo-bulk data for Glu4 neurons
+DefaultAssay(neurons) <- "RNA"
+sample <- unique(neurons$sample)
+
+pseudo.data <- data.frame(matrix(NA, nrow = nrow(neurons), ncol = length(sample)))
+colnames(pseudo.data) <- sample
+rownames(pseudo.data) <- rownames(neurons)
+
+for (j in 1:length(sample)) {
+  pseudo.data[, j] <- as.integer(apply(neurons@assays$RNA@counts[, which(neurons$cell.subtype2 == "Glu4" &
+                                                                           neurons$sample == sample[j])], 1, sum))
+  }
+
+count.data <- pseudo.data[,c(grep("S", colnames(pseudo.data)), grep("W", colnames(pseudo.data)))]
+condition <- factor(gsub("[0-9]", "", colnames(count.data)), levels = c("W", "S"))
+batch <- factor(c(1, 2, 3, 3, 4, 5, 5, 2, 3, 3, 4, 5, 5, 5)) 
+design.data <- data.frame(condition = condition, batch = batch)
+
+# Differential expression
+idx <- which(apply(count.data, 1, sum) == 0)
+dds <- DESeqDataSetFromMatrix(count.data[-c(idx),], 
+                             design.data, 
+                             design = ~ condition + batch)
+dds <- DESeq(dds)
+resultsNames(dds) 
+DEGs <- results(dds, name="condition_S_vs_W")
+
+# Extract top 10 M1 module genes
+genes <- hub.genes[1:10]
+glu4.gene.expr <- data.frame(t(counts(dds, normalized = T)[genes, ]))
+rownames(glu4.gene.expr) <- gsub("S", "Semaglutide", rownames(glu4.gene.expr))
+rownames(glu4.gene.expr) <- gsub("W", "Weight-matched", rownames(glu4.gene.expr))
+
+# Mean and SEM
+glu4.expr.mean <- aggregate(glu4.gene.expr, list(gsub("[0-9]", "", rownames(glu4.gene.expr))), mean,
+                     na.rm = T)
+glu4.expr.summary <- melt(glu4.expr.mean, id.vars = c("Group.1"))
+colnames(glu4.expr.summary) <- c("treatment", "gene", "mean.expr")
+
+glu4.expr.sem <- aggregate(glu4.gene.expr, list(gsub("[0-9]", "", rownames(glu4.gene.expr))), std.error,
+                    na.rm = T)
+glu4.expr.summary$sem <- melt(glu4.expr.sem, id.vars = c("Group.1"))$value
+
+
+# All values
+glu4.gene.expr.long <- glu4.gene.expr
+glu4.gene.expr.long$treatment <- gsub("[0-9]", "", rownames(glu4.gene.expr.long))
+glu4.gene.expr.long <- melt(glu4.gene.expr.long, id.vars = "treatment")
+colnames(glu4.gene.expr.long) <- c("treatment", "gene", "expr")
+
+# Bonferroni-adjusted p-value
+glu4.expr.p <- p.adjust(DEGs[genes,]$pvalue, method = "bonferroni")
+
+# P-value position
+asterisk.position <- c()
+for (i in 1:length(genes)) {
+  if (glu4.expr.p[i] < 0.05) {
+    gene <- genes[i]
+    asterisk.position <- c(asterisk.position, 
+                       max(glu4.expr.summary$mean.expr[which(glu4.expr.summary$gene == gene)] +
+                             glu4.expr.summary$sem[which(glu4.expr.summary$gene == gene)]))
+  }
+}
+asterisk.position[1] <- max(glu4.gene.expr$Vgf)
+asterisk.position[3] <- max(glu4.gene.expr$Ptprn)
+asterisk.position[4] <- max(glu4.gene.expr$Bdnf)
+
+xmin <- which(glu4.expr.p < 0.05) - 0.125
+xmax <- which(glu4.expr.p < 0.05) + 0.125
+
+
+# Plot
+pal <- c("#C27D38", "#BFBFBA")
+glu4.M1.genes.plot <- ggplot(glu4.expr.summary, aes(x = gene, y = mean.expr, 
+                                                  fill = treatment)) +
+  geom_bar(stat = "identity", position="dodge", color = "black", width = 0.7, size = 0.3) +
+  geom_point(data = glu4.gene.expr.long, aes(x = gene, y = expr, fill = treatment), 
+              size = 0.1, color = "black", position = position_jitterdodge(jitter.width = 0)) +
+  geom_errorbar(data = glu4.expr.summary, aes(ymin = mean.expr, ymax = mean.expr+sem), width = 0.5, 
+                position=position_dodge(0.7), size = 0.3) +
+  xlab("") + ylab("Normalized expression") +
+  theme_pubr() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.text.x = element_text(size=6, face="bold.italic", angle=45, hjust=1),
+        axis.text.y = element_text(size=6, face="bold"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.key.height = unit(0.1, "cm"),
+        legend.key.width = unit(0.2, "cm"),
+        legend.margin=margin(0, 0, 0, 0),
+        legend.box.margin=margin(0, 0, 5, 0),
+        legend.spacing.y = unit(0.1, "cm"),
+        plot.margin = unit(c(0, 0, -0.2, 0.3), "cm")) +
+  scale_y_continuous(breaks=seq(0, 300, 50), limits = c(0, 327)) +
+  scale_fill_manual(values = pal, labels = c("Semaglutide", "Weight-matched")) +
+  guides(fill = guide_legend(nrow = 2, byrow = T)) +
+    geom_signif(y_position=c(10+asterisk.position), xmin = xmin, 
+              xmax=xmax, tip_length = 0.01, 
+              fontface = "bold", 
+              annotation = c("0.03", "'4x10'^-7", "0.02", "0.03"),
+              size = 0.2, textsize = 1.55, parse=T) 
+glu4.M1.genes.plot
+```
+
+# Combine all plots
+```{r}
+blank.plot <- ggplot() + geom_blank(aes(0.1,0.1)) + 
+  cowplot::theme_nothing()
+
+plot1 <- plot_grid(blank.plot, get_legend(module.expr.plot), 
+                   blank.plot, get_legend(module.enrich.plot),
+                   ncol = 4, align = "tb",
+                   rel_widths = c(0.05, 0.35, 0.08, 0.92)) 
+
+plot2 <- plot_grid(module.expr.plot + theme(legend.position = "none"),
+                   cell.type.enrichment.plot + theme(legend.position = "none"),
+                   ncol = 2, align = "h",
+                   rel_widths = c(0.4, 1), axis = "t") 
+
+
+plot3 <- plot_grid(plot1, plot2, ncol = 1, align = "v", 
+                   rel_heights = c(0.15, 1))
+
+plot4 <- plot_grid(blank.plot, get_legend(module.plot),
+                   blank.plot, get_legend(glu4.M1.genes.plot),
+                   ncol = 4, align = "tb",
+                   rel_widths = c(0.6, 0.4, 0.85, 0.95))
+
+plot5 <- plot_grid(module.plot + theme(legend.position = "none"), 
+                    glu4.M1.genes.plot + theme(legend.position = "none"),
+                    ncol = 2, align = "h",
+                    rel_widths = c(0.37, 0.3), axis = "t")
+
+plot6 <- plot_grid(plot4, plot5, ncol = 1, align = "v", 
+                   rel_heights = c(0.15, 1))
+
+# margin: top, right, bottom, and left
+plot7 <- plot_grid(GO.plot + theme(plot.margin = unit(c(0, 0, 0.3, 0), "cm")), 
+                   plot6 + theme(plot.margin = unit(c(0, 0, 0.16, 0), "cm")),
+                   blank.plot,
+                   ncol = 3, align = "h",
+                   rel_widths = c(0.3, 0.67, 0.43), axis = "t") 
+
+fig4 <- plot_grid(plot3 + theme(plot.margin = unit(c(0, 0, 0, 0.1), "cm")), 
+                  plot7 + theme(plot.margin = unit(c(0, 0, -0.25, 0.1), "cm")), 
+                  ncol = 1, align = "v",
+                   rel_heights = c(1,0.92)) 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/figure4.png", fig4, height = 96, width = 183,
+       units = "mm")
+```
+
+# Supplementary data 4
+```{r}
+samples.sub <- rownames(MEs)[grep("Semaglutide|WM", rownames(MEs))]
+
+treatment <- gsub("AP_", "", samples.sub)
+treatment <- gsub(" .*", "", treatment)
+
+treatment <- factor(treatment, levels = c("WM", "Semaglutide"))
+
+MEs.sub <- MEs[samples.sub, !(colnames(MEs) == paste0("M", ncol(MEs)))]
+
+data <- data.frame(matrix(NA, ncol = 5, nrow = ncol(MEs.sub)))
+colnames(data) <- c("module", "differential_expression", "SE", "pvalue", "padj")
+data$module <- colnames(MEs.sub)
+
+for (i in 1:nrow(data)) {
+  
+  module.eigengene <- MEs.sub[, i]
+  
+  # Logistic regression
+  model1 <- glm(treatment ~ module.eigengene, family = "binomial", control = list(maxit = 50))
+  model2 <- glm(treatment ~ 1, family = "binomial", control = list(maxit = 50))
+
+  # Likelihood ratio test
+  lrtest <- lrtest(model1, model2)
+  data$pvalue[i] <- lrtest$Pr[2]
+  
+  expression1 <- mean(module.eigengene[which(treatment == "Semaglutide")])
+  expression2 <- mean(module.eigengene[which(treatment == "WM")])
+  var1 <- var(module.eigengene[which(treatment == "Semaglutide")])
+  var2 <- var(module.eigengene[which(treatment == "WM")])
+  n1 <- length(module.eigengene[which(treatment == "Semaglutide")])
+  n2 <- length(module.eigengene[which(treatment == "WM")])
+  
+  data$differential_expression[i] <- expression1 - expression2
+
+  data$SE[i] <- sqrt(var1/n1 + var2/n2)
+
+}
+
+# Adjust for multiple testing
+data$padj <- p.adjust(data$pvalue, method = "bonferroni")
+
+supp.data4 <- list(data)
+names(supp.data4)[1] <- "Semaglutide_vs_WM"
+
+for (i in names(network)) {
+  module.genes <- rownames(gene.assignment)[gene.assignment$module == i]
+  kmes <- kme[module.genes, i]
+  hub.genes <- module.genes[order(kmes, decreasing=T)]
+  hub.kmes <- kmes[order(kmes, decreasing=T)]
+  hub.data <- cbind.data.frame(gene = hub.genes, kme = hub.kmes)
+  supp.data4 <- list.append(supp.data4, hub.data)
+  names(supp.data4)[length(supp.data4)] <- paste0("Module_", i)
+}
+
+supp.data4[[length(supp.data4)]] <- supp.data4[[length(supp.data4)]][, "gene", drop=F]
+names(supp.data4)[length(supp.data4)] <- "Unassigned"
+
+
+write.xlsx(supp.data4, file = "/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data4.xlsx",
+           rowNames = F)
+
+```
+
+# Source data fig. 4
+```{r}
+source.data4 <- list()
+
+fig4a.source <- module.expr
+fig4a.source$animal <- as.numeric(gsub(".*animal ", "", rownames(fig4a.source)))
+fig4a.source <- fig4a.source[, c(5:6, 1:4)]
+colnames(fig4a.source)[1:2] <- c("treatment", "animal")
+fig4a.source$treatment <- gsub("Semaglutide", "semaglutide", fig4a.source$treatment)
+fig4a.source$treatment <- gsub("Weight-matched", "WM", fig4a.source$treatment)
+source.data4 <- list.append(source.data4, fig4a.source)
+
+fig4b.source <- module.enrich[, c(4, 1, 3)]
+colnames(fig4b.source) <- c("cell_population", "module", "padj")
+source.data4 <- list.append(source.data4, fig4b.source)
+
+fig4c.source <- module.GO.terms[, 1:4]
+colnames(fig4c.source) <- c("domain", "term_name", "padj", "overlap_size")
+source.data4 <- list.append(source.data4, fig4c.source)
+
+fig4e.source <- glu4.gene.expr
+fig4e.source$treatment <- gsub("[0-9]", "", rownames(fig4e.source))
+fig4e.source$treatment <- gsub("Semaglutide", "semaglutide", fig4e.source$treatment)
+fig4e.source$treatment <- gsub("Weight-matched", "WM", fig4e.source$treatment)
+fig4e.source$animal <- as.numeric(gsub("Semaglutide|Weight-matched", "", rownames(fig4e.source)))
+fig4e.source <- fig4e.source[, c(11:12, 1:10)]
+
+source.data4 <- list.append(source.data4, fig4e.source)
+
+
+names(source.data4) <- c("4a", "4b", "4c", "4e")
+write.xlsx(source.data4, file = "/projects/mludwig/Ludwig-2021/output/tables/Source_Data_Fig4.xlsx",
+           rowNames = F)
+```

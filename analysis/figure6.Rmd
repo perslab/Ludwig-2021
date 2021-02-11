@@ -1,0 +1,604 @@
+---
+title: "figure6"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(reshape2)
+library(cowplot)
+library(pzfx)
+library(plotrix)
+library(openxlsx)
+library(lme4)
+library(emmeans)
+library(metafor)
+library(rlist)
+```
+
+# Load data
+```{r}
+# snRNA-seq data
+AP <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj.rds")
+neurons <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_Seurat_obj.rds")
+
+neuron.type.info <- readRDS("/projects/mludwig/Ludwig-2021/output/AUCell/neuron_type_info.rds")
+
+neurons$cell.subtype2 <- neuron.type.info$cell.type2[match(neurons$cell.subtype,
+                                                           neuron.type.info$cell.type)]
+neurons$cell.subtype2 <- factor(neurons$cell.subtype2, 
+                                      levels = neuron.type.info$cell.type2)
+
+AP$cell.type2 <- as.character(AP$cell.type)
+AP$cell.type2[grepl("Neurons", AP$cell.type)] <-
+  as.character(neurons$cell.subtype2[na.omit(match(colnames(AP),
+                                                        colnames(neurons)))])
+
+# snATAC-seq data
+AP.peaks <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_peaks_Seurat_obj.rds")
+neurons.peaks <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_peaks_Seurat_obj.rds")
+
+
+neurons.peaks$cell.subtype2 <- neuron.type.info$cell.type2[match(neurons.peaks$cell.subtype,
+                                                                 neuron.type.info$cell.type)]
+neurons.peaks$cell.subtype2 <- factor(neurons.peaks$cell.subtype2, 
+                                      levels = neuron.type.info$cell.type2
+                                      [which(neuron.type.info$cell.type2 %in%
+                                               neurons.peaks$cell.subtype2)])
+
+AP.peaks$cell.type2 <- as.character(AP.peaks$cell.type)
+AP.peaks$cell.type2[grepl("Neurons", AP.peaks$cell.type)] <-
+  as.character(neurons.peaks$cell.subtype2[na.omit(match(colnames(AP.peaks),
+                                                        colnames(neurons.peaks)))])
+```
+
+# Fig. 6b
+```{r}
+# Load CELLECT results
+cellect.RNA <- read.table(paste0("/projects/mludwig/genetics/CELLECT/output/AP_RNA__",
+                              "BMI_UKBB_Loh2018.cell_type_results.txt"),
+                       header = T)
+
+# Prepare data for plotting
+cellect.RNA$cell.type <- gsub("AP_RNA__", "", cellect.RNA$Name)
+cellect.RNA$cell.type <- gsub("\\.", " ", cellect.RNA$cell.type)
+cellect.RNA$cell.type <- gsub("Tanycyte like cells", "Tanycyte-like cells", cellect.RNA$cell.type)
+
+cellect.RNA$cell.type2 <- factor(cellect.RNA$cell.type,
+                          levels = c("Astrocytes", "Endothelial cells", 
+                                     "Ependymal cells", "Microglia", 
+                                     "Oligodendrocytes", "OPCs", 
+                                     "Tanycyte-like cells", "VLMCs",
+                                     neuron.type.info$cell.type2))
+
+
+cellect.RNA$cell.type2[which(cellect.RNA$cell.type %in% neuron.type.info$cell.type)] <-
+  neuron.type.info$cell.type2[na.omit(match(cellect.RNA$cell.type, neuron.type.info$cell.type))]
+
+cellect.RNA$padj <- p.adjust(cellect.RNA$Coefficient_P_value, method = "bonferroni")
+
+cellect.RNA <- cellect.RNA[, c(6, 2:4, 7)]
+colnames(cellect.RNA) <- c("cell.type2", "coefficient", "SE", "pvalue", "padj")
+
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2,
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area)] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area)] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area)] <- 1
+
+brain.area <- rbind(data.frame(cell.type2 = levels(cellect.RNA$cell.type2)[1:8], 
+                               AP = 1, NTS = NA, DMV = NA), brain.area)
+brain.area$NTS[which(brain.area$cell.type2 %in% 
+                       c("Astrocytes", "Microglia", "OPCs", "Oligodendrocytes"))] <- 1
+brain.area$DMV[which(brain.area$cell.type %in%
+                       c("Astrocytes", "Microglia", "OPCs", "Oligodendrocytes"))] <- 1
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("DMV", "NTS", "AP"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = c("Astrocytes", "Endothelial cells", 
+                                           "Ependymal cells", "Microglia", 
+                                           "Oligodendrocytes", "OPCs", 
+                                           "Tanycyte-like cells", "VLMCs",
+                                           neuron.type.info$cell.type2))
+
+
+color.point <- rep("black", nrow(cellect.RNA))
+color.point[which(levels(cellect.RNA$cell.type2) %in% c("Glu4"))] <- "#9BAAD4"
+color.point[which(levels(cellect.RNA$cell.type2) %in% c("Glu9"))] <-  "#736558"
+color.point[which(levels(cellect.RNA$cell.type2) %in% c("Glu10"))] <- "#BFA280"
+color.point[which(levels(cellect.RNA$cell.type2) %in% c("Glu11"))] <-  "#EB6B59"
+
+
+color.label<- rep("black", nrow(cellect.RNA))
+color.label[which(cellect.RNA$cell.type2 %in% c("Glu4"))] <- "#9BAAD4"
+color.label[which(cellect.RNA$cell.type2 %in% c("Glu9"))] <- "#736558"
+color.label[which(cellect.RNA$cell.type2 %in% c("Glu10"))] <- "#BFA280"
+color.label[which(cellect.RNA$cell.type2 %in% c("Glu11"))] <- "#EB6B59"
+
+
+cellect.RNA$label <- ""
+cellect.RNA$label[which(cellect.RNA$cell.type2 %in% c("Glu4"))] <- "Glp1r/Gfral"
+cellect.RNA$label[which(cellect.RNA$cell.type2 %in% c("Glu9"))] <- "Eya1"
+cellect.RNA$label[which(cellect.RNA$cell.type2 %in% c("Glu10"))] <- "Calcr/Ramp3"
+cellect.RNA$label[which(cellect.RNA$cell.type2 %in% c("Glu11"))] <- "Glp1r/Calcr"
+
+# Plot CELLECT scores
+cellect.RNA.plot <- ggplot(cellect.RNA, aes(x = cell.type2, y = -log10(padj),  label = label)) +
+  geom_point(stat="identity", position = position_dodge(0.9), 
+             fill = "grey", color = color.label, size=1) +
+  xlab("") + ylab(expression(paste(bold(-log[10]),bold("("), bolditalic("P"),
+                                   bold(")")))) + 
+  theme_pubr() +
+  theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(), 
+    axis.title.y = element_text(size=6, face="bold", vjust = -1,
+                                margin=unit(c(0,-0.2,0,0), "cm")),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(), 
+    axis.text.y = element_text(face = "bold", size=6),
+    plot.margin = unit(c(0, 0, -0.25, 0), "cm")) +
+  geom_hline(yintercept = -log10(0.05), lty = 2) +
+  geom_text_repel(fontface="bold.italic", size=2, nudge_y=0.13, color = color.label) +
+  guides(fill = guide_legend(title = "P-value")) +
+      scale_y_continuous(breaks = seq(0, floor(max(-log10(cellect.RNA$padj))), 1), limits = c(0, 2.2))
+
+# Plot DVCC origin
+brain.area.plot <- ggplot(brain.area, aes(x = cell.type2, y = area)) +
+  geom_tile(size=1, color = "white", fill="grey99") +
+  geom_point(aes(size=size), color="grey60", shape=15) + 
+  scale_size(range = c(0,2)) +
+  scale_color_manual(values = "black") +
+  theme_pubr() + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6, face="bold", color=color.point), 
+        legend.position = "none",
+        axis.line = element_line(colour = "black"),
+        axis.text = element_text(size=6, face="bold"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(-0.25, 0, 0, 0.5), "cm")) 
+
+RNA.plot <- plot_grid(cellect.RNA.plot, brain.area.plot, align = "v", ncol = 1, 
+          rel_heights = c(1.6,1))
+RNA.plot
+```
+
+# Fig. 6c
+```{r}
+# Load CELLECT results
+cellect.ATAC <- read.table(paste0("/projects/mludwig/genetics/CELLECT/output/AP_ATAC__",
+                              "BMI_UKBB_Loh2018.cell_type_results.txt"),
+                       header = T)
+
+# Prepare data for plotting
+cellect.ATAC$cell.type <- gsub("AP_ATAC__", "", cellect.ATAC$Name)
+cellect.ATAC$cell.type <- gsub("\\.", " ", cellect.ATAC$cell.type)
+cellect.ATAC$cell.type <- gsub("Tanycyte like cells", "Tanycyte-like cells", cellect.ATAC$cell.type)
+
+
+idx <- which(neuron.type.info$cell.type %in% cellect.ATAC$cell.type)
+cellect.ATAC$cell.type2 <- factor(cellect.ATAC$cell.type,
+                          levels = c("Astrocytes", "Endothelial cells", 
+                                     "Ependymal cells", "Microglia", 
+                                     "Oligodendrocytes", "OPCs", 
+                                     "Tanycyte-like cells", "VLMCs",
+                                     neuron.type.info$cell.type2[idx]))
+
+cellect.ATAC$cell.type2[which(cellect.ATAC$cell.type %in% neuron.type.info$cell.type)] <-
+  neuron.type.info$cell.type2[na.omit(match(cellect.ATAC$cell.type, neuron.type.info$cell.type))]
+
+cellect.ATAC$padj <- p.adjust(cellect.ATAC$Coefficient_P_value, method = "bonferroni")
+
+cellect.ATAC <- cellect.ATAC[, c(6, 2:4, 7)]
+colnames(cellect.ATAC) <- c("cell.type2", "coefficient", "SE", "pvalue", "padj")
+
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2[idx],
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area[idx])] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area[idx])] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area[idx])] <- 1
+
+brain.area <- rbind(data.frame(cell.type2 = levels(cellect.ATAC$cell.type2)[1:8], 
+                               AP = 1, NTS = NA, DMV = NA), brain.area)
+brain.area$NTS[which(brain.area$cell.type2 %in% 
+                       c("Astrocytes", "Microglia", "OPCs", "Oligodendrocytes"))] <- 1
+brain.area$DMV[which(brain.area$cell.type %in%
+                       c("Astrocytes", "Microglia", "OPCs", "Oligodendrocytes"))] <- 1
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("DMV", "NTS", "AP"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = c("Astrocytes", "Endothelial cells", 
+                                           "Ependymal cells", "Microglia", 
+                                           "Oligodendrocytes", "OPCs", 
+                                           "Tanycyte-like cells", "VLMCs",
+                                           neuron.type.info$cell.type2[idx]))
+
+color.point <- rep("black", nrow(cellect.ATAC))
+color.point[which(levels(cellect.ATAC$cell.type2) %in% c("Glu1"))] <- "#F7C1BA"
+color.point[which(levels(cellect.ATAC$cell.type2) %in% c("Glu2"))] <- "#AAE2F0"
+color.point[which(levels(cellect.ATAC$cell.type2) %in% c("Glu4"))] <- "black"
+color.point[which(levels(cellect.ATAC$cell.type2) %in% c("Glu5"))] <- "#D47557"
+color.point[which(levels(cellect.ATAC$cell.type2) %in% c("Glu7"))] <- "#6ABAA7"
+color.point[which(levels(cellect.ATAC$cell.type2) %in% c("Glu10"))] <- "#BFA280"
+color.point[which(levels(cellect.ATAC$cell.type2) %in% c("Glu11"))] <- "black"
+
+color.label<- rep("black", nrow(cellect.ATAC))
+color.label[which(cellect.ATAC$cell.type2 %in% c("Glu1"))] <- "#F7C1BA"
+color.label[which(cellect.ATAC$cell.type2 %in% c("Glu2"))] <- "#AAE2F0"
+color.label[which(cellect.ATAC$cell.type2 %in% c("Glu4"))] <- "black"
+color.label[which(cellect.ATAC$cell.type2 %in% c("Glu5"))] <- "#D47557"
+color.label[which(cellect.ATAC$cell.type2 %in% c("Glu7"))] <- "#6ABAA7"
+color.label[which(cellect.ATAC$cell.type2 %in% c("Glu10"))] <- "#BFA280"
+color.label[which(cellect.ATAC$cell.type2 %in% c("Glu11"))] <- "black"
+
+
+cellect.ATAC$label <- ""
+cellect.ATAC$label[which(cellect.ATAC$cell.type2 %in% c("Glu1"))] <- "Sox6"
+cellect.ATAC$label[which(cellect.ATAC$cell.type2 %in% c("Glu2"))] <- "Hsd11b2"
+cellect.ATAC$label[which(cellect.ATAC$cell.type2 %in% c("Glu4"))] <- "Glp1r/Gfral"
+cellect.ATAC$label[which(cellect.ATAC$cell.type2 %in% c("Glu5"))] <- "Gfral"
+cellect.ATAC$label[which(cellect.ATAC$cell.type2 %in% c("Glu7"))] <- "Gpc3"
+cellect.ATAC$label[which(cellect.ATAC$cell.type2 %in% c("Glu10"))] <- "Calcr/Ramp3"
+cellect.ATAC$label[which(cellect.ATAC$cell.type2 %in% c("Glu11"))] <- "Glp1r/Calcr"
+
+# Plot CELLECT scores
+cellect.ATAC.plot <- ggplot(cellect.ATAC, aes(x = cell.type2, y = -log10(padj), 
+                                              label = label)) +
+  geom_point(stat="identity", position = position_dodge(0.9), 
+             fill = "grey", color = color.label, size=1) +
+  xlab("") +  ylab(expression(paste(bold(-log[10]),bold("("), bolditalic("P"),
+                                   bold(")")))) + 
+  theme_pubr() +
+  theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(), 
+    axis.title.y = element_text(size=6, face="bold", vjust = -1,
+                                margin=unit(c(0,-0.2,0,0), "cm")),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(), 
+    axis.text.y = element_text(face = "bold", size=6),
+    plot.margin = unit(c(0, 0, -0.25, 0), "cm")) +
+  geom_hline(yintercept = -log10(0.05), lty = 2) +
+    geom_text_repel(fontface="bold.italic", size=2, nudge_y=0.15, color = color.label) +
+  guides(fill = guide_legend(title = "P-value")) +
+      scale_y_continuous(breaks = seq(0, floor(max(-log10(cellect.ATAC$padj))), 1), limits = c(0, 2.85))
+
+# Plot DVC origin
+brain.area.plot <- ggplot(brain.area, aes(x = cell.type2, y = area)) +
+  geom_tile(size=1, color = "white", fill="grey99") +
+  geom_point(aes(size=size), color="grey60", shape=15) + 
+  scale_size(range = c(0,2)) +
+  scale_color_manual(values = "black") +
+  theme_pubr() + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6, face="bold", 
+                                   color = color.point), 
+        legend.position = "none",
+        axis.line = element_line(colour = "black"),
+        axis.text = element_text(size=6, face="bold"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(-0.25, 0, 0, 0.5), "cm")) 
+
+ATAC.plot <- plot_grid(cellect.ATAC.plot, brain.area.plot, align = "v", ncol = 1, 
+                       rel_heights = c(1.3,1))
+ATAC.plot
+```
+
+
+# Ccompute correlation between RNA and ATAC results
+```{r}
+p.values.RNA <- cellect.RNA$pvalue[match(levels(cellect.ATAC$cell.type2),
+                                                      cellect.RNA$cell.type2)]
+p.values.ATAC <- cellect.ATAC$pvalue[match(levels(cellect.ATAC$cell.type2),
+                                                       cellect.ATAC$cell.type2)]
+cor.test(p.values.RNA, p.values.ATAC, method = "spearman")
+```
+
+# Meta-analysis of CELLECT scores
+```{r}
+meta.data.RNA <- cellect.RNA[!(cellect.RNA$cell.type2 %in% c("GABA7", "Glu14", "Glu15")), ]
+meta.data.RNA <- meta.data.RNA[order(meta.data.RNA$cell.type2),]
+
+meta.data.ATAC <- cellect.ATAC[order(cellect.ATAC$cell.type2),]
+
+
+meta.data <- data.frame(matrix(NA, nrow = nrow(meta.data.RNA), ncol = 7))
+colnames(meta.data) <- c("cell_population", "n1", "b1", "se1", "n2", "b2", "se2")
+
+meta.data$cell_population <- meta.data.RNA$cell.type2
+
+for (i in 1:nrow(meta.data)) {
+  cell.type <- as.character(meta.data$cell_population[i])
+  meta.data$n1[i] <- length(which(AP$cell.type2 == cell.type))
+  meta.data$n2[i] <- length(which(AP.peaks$cell.type2 == cell.type))
+  
+  meta.data$b1[i] <- meta.data.RNA$coefficient[which(meta.data.RNA$cell.type2 == cell.type)]
+  meta.data$b2[i] <- meta.data.ATAC$coefficient[which(meta.data.ATAC$cell.type2 == cell.type)]
+  
+  meta.data$se1[i] <- meta.data.RNA$SE[which(meta.data.RNA$cell.type2 == cell.type)]
+  meta.data$se2[i] <- meta.data.ATAC$SE[which(meta.data.ATAC$cell.type2 == cell.type)]
+}
+
+
+meta.results <- data.frame(cell_population = NULL, meta_coefficient = NULL, meta_SE = NULL, 
+                           meta_pvalue = NULL)			
+
+
+for (i in 1:nrow(meta.data)) {														
+  case <- meta.data$cell_population[i]											
+  b <- meta.data[i, cbind("b1","b2")]										
+  b <- t(b)														
+  se <- meta.data[i, cbind("se1","se2")]
+  se <- t(se)
+  n <- meta.data[i, cbind("n1","n2")]
+  n <- t(n)
+  
+  model <- rma.uni(yi = b, sei = se, method = "FE")
+  tmp <- data.frame(cell_population = case, 
+                    meta_coefficient = model$beta[1], meta_SE = model$se[1], 
+                    meta_pvalue = model$pval[1])
+  
+  meta.results <- rbind(meta.results,tmp)
+
+  
+  
+}
+
+# One-sided test
+meta.results$meta_pvalue <- meta.results$meta_pvalue / 2
+meta.results$meta_pvalue[which(sign(meta.results$meta_coefficient) == -1)] <- 
+1 - meta.results$meta_pvalue[which(sign(meta.results$meta_coefficient) == -1)]
+
+
+meta.results$meta_padj <- p.adjust(meta.results$meta_pvalue, method = "bonferroni")
+
+meta.results <- meta.results[order(meta.results$meta_pvalue),]
+```
+
+# Supplementary Data 6
+```{r}
+meta.results$cell_population <- gsub(" ", "_", meta.results$cell_population)
+
+supp.data6 <- list(meta.results)
+names(supp.data6) <- "Meta_analysis"
+
+write.xlsx(supp.data6, file = "/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data6.xlsx",
+           rowNames = F)
+```
+
+# Fig. 6f
+```{r}
+# Load data
+DREADD.FI <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_CalcrAP.xlsx", rowNames = T)
+DREADD.FI <- data.frame(t(DREADD.FI))
+
+# Mean and SEM
+DREADD.FI.mean <- aggregate(t(DREADD.FI), list(gsub("[0-9]", "", colnames(DREADD.FI))), mean,
+                     na.rm = T)
+DREADD.FI.sem <- aggregate(t(DREADD.FI), list(gsub("[0-9]", "", colnames(DREADD.FI))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+DREADD.FI.mean <- melt(DREADD.FI.mean, id.vars = c("Group.1"))
+DREADD.FI.sem <- melt(DREADD.FI.sem, id.vars = c("Group.1"))
+
+DREADD.FI.summary <- cbind(DREADD.FI.mean, DREADD.FI.sem$value)
+colnames(DREADD.FI.summary) <- c("treatment", "hour", "FI", "SEM")
+DREADD.FI.summary$treatment <- factor(DREADD.FI.summary$treatment, 
+                                 levels = c("CalcrDqS", "CalcrDqCNO"))
+DREADD.FI.summary$hour <- as.numeric(as.character(DREADD.FI.summary$hour))
+
+# Statistical test
+DREADD.FI.long <- DREADD.FI
+DREADD.FI.long$hour <- rownames(DREADD.FI.long)
+DREADD.FI.long <- melt(DREADD.FI.long, id.vars = "hour")
+colnames(DREADD.FI.long) <- c("hour", "sample", "FI")
+DREADD.FI.long$treatment <- gsub("[0-9]", "", DREADD.FI.long$sample)
+DREADD.FI.long$treatment <- factor(DREADD.FI.long$treatment, levels = c("CalcrDqS", "CalcrDqCNO"))
+DREADD.FI.long$hour <- factor(DREADD.FI.long$hour, levels = c(0, 2, 4, 6, 16, 24))
+
+# Linear mixed effects model
+DREADD.FI.model <- lmer(FI ~ treatment * hour + (1|sample),
+            data=DREADD.FI.long,
+            REML=TRUE)
+
+# Least-squares means
+DREADD.FI.model <- lsmeans(DREADD.FI.model, pairwise ~ treatment | hour, adjust = "bonferroni")
+DREADD.FI.model <- summary(DREADD.FI.model$contrasts)
+
+DREADD.FI.summary$p.adj <- NA
+DREADD.FI.summary$p.adj[which(DREADD.FI.summary$treatment == "CalcrDqCNO")] <- 
+  signif(DREADD.FI.model$p.value[which(DREADD.FI.model$contrast == "CalcrDqS - CalcrDqCNO")], digits = 1)
+
+# Asterisk position
+position <- c()
+for (i in (unique(DREADD.FI.summary$hour))) {
+  position <- c(position, max(DREADD.FI.summary$FI[DREADD.FI.summary$hour == i] + 
+                                DREADD.FI.summary$SEM[DREADD.FI.summary$hour == i]))
+}
+position <- data.frame(hour = unique(DREADD.FI.summary$hour), y = position)
+
+CNO.signif <- DREADD.FI.summary[which(DREADD.FI.summary$treatment == "CalcrDqCNO" & DREADD.FI.summary$p.adj < 0.05),]
+CNO.signif$y <- position$y[which(position$hour %in% CNO.signif$hour)]
+
+
+# Plot
+pal <- c("#90CEDE", "#4C3091")
+pd <- position_dodge(0.1)
+DREADD.FI.plot <- ggplot(data = DREADD.FI.summary, aes(x = hour, y = FI, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .5) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  scale_y_continuous(name="Cumulative food intake (g)", limits=c(0, 30), 
+                     breaks=seq(0, 30, 5)) +
+  scale_x_continuous(name="Hours", limits=c(0, 24.5), 
+                     breaks=seq(0, 24, 2)) +
+  scale_color_manual(values = pal, 
+                     labels=c(expression(paste(bolditalic("Dq "), bold("+ saline"))),
+                              expression(paste(bolditalic("Dq "), bold("+ CNO"))))) +
+  theme_pubr(legend = "right") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust = 1, size=6, face = "bold"),
+        axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+   geom_signif(y_position=c(CNO.signif$y + 0.5), xmin=CNO.signif$hour, 
+              xmax=CNO.signif$hour, size=0, textsize=1.55, parse = T, hjust = 0.4, 
+              annotation=c("0.02", "0.01", "'10'^-5", "'7x10'^-6"), 
+              fontface = "bold", colour = "black")
+DREADD.FI.plot
+```
+
+# Fig. 6g
+```{r}
+# Load data
+control.FI <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/control_CalcrAP.xlsx", rowNames = T)
+control.FI <- data.frame(t(control.FI))
+
+# Mean and SEM
+control.FI.mean <- aggregate(t(control.FI), list(gsub("[0-9]", "", colnames(control.FI))), mean,
+                     na.rm = T)
+control.FI.sem <- aggregate(t(control.FI), list(gsub("[0-9]", "", colnames(control.FI))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+control.FI.mean <- melt(control.FI.mean, id.vars = c("Group.1"))
+control.FI.sem <- melt(control.FI.sem, id.vars = c("Group.1"))
+
+control.FI.summary <- cbind(control.FI.mean, control.FI.sem$value)
+colnames(control.FI.summary) <- c("treatment", "hour", "FI", "SEM")
+control.FI.summary$treatment <- factor(control.FI.summary$treatment, 
+                                 levels = c("CalcrS", "CalcrCNO"))
+control.FI.summary$hour <- as.numeric(as.character(control.FI.summary$hour))
+
+# Statistical test
+control.FI.long <- control.FI
+control.FI.long$hour <- rownames(control.FI.long)
+control.FI.long <- melt(control.FI.long, id.vars = "hour")
+colnames(control.FI.long) <- c("hour", "sample", "FI")
+control.FI.long$treatment <- gsub("[0-9]", "", control.FI.long$sample)
+control.FI.long$treatment <- factor(control.FI.long$treatment, levels = c("CalcrS", "CalcrCNO"))
+control.FI.long$hour <- factor(control.FI.long$hour, levels = c(0, 2, 4, 6, 16, 24))
+
+# Linear mixed effects model
+control.FI.model <- lmer(FI ~ treatment * hour + (1|sample),
+            data=control.FI.long,
+            REML=TRUE)
+# Least-squares means
+control.FI.model <- lsmeans(control.FI.model, pairwise ~ treatment | hour, adjust = "bonferroni")
+control.FI.model <- summary(control.FI.model$contrasts)
+
+control.FI.summary$p.adj <- NA
+control.FI.summary$p.adj[which(control.FI.summary$treatment == "CalcrCNO")] <- 
+  control.FI.model$p.value[which(control.FI.model$contrast == "CalcrS - CalcrCNO")]
+
+# Plot
+pal <- c("#90CEDE", "#4C3091")
+pd <- position_dodge(0.1)
+control.FI.plot <- ggplot(data = control.FI.summary, aes(x = hour, y = FI, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .5) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  scale_y_continuous(name="Cumulative food intake (g)", limits=c(0, 30), 
+                     breaks=seq(0, 30, 5)) +
+  scale_x_continuous(name="Hours", limits=c(0, 24.5), 
+                     breaks=seq(0, 24, 2)) +
+  scale_color_manual(values = pal, 
+                     labels=c(expression(bold("Saline")),
+                              expression(bold("CNO")))) +
+  theme_pubr(legend = "right") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust = 1, size=6, face = "bold"),
+        axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) 
+control.FI.plot
+```
+
+# Combine all plots
+```{r}
+# margin: top, right, bottom, and left
+blank.plot <- ggplot() + geom_blank(aes(0.1,0.1)) + 
+  cowplot::theme_nothing()
+
+
+plot1 <- plot_grid(blank.plot, 
+                   RNA.plot, 
+                   ncol = 2, align = "h",
+                   rel_widths = c(2, 3)) 
+
+plot2 <- plot_grid(ATAC.plot + theme(plot.margin = unit(c(0.25, -0.2, 0, -0.3), "cm")),
+                   blank.plot,
+                   ncol = 2, align = "h",
+                   rel_widths = c(2, 3)) 
+
+
+plot3 <- plot_grid(DREADD.FI.plot + theme(plot.margin = unit(c(0.25, 0.11, 0, 0.18), "cm"),
+                                       legend.position ="none"), 
+                   get_legend(DREADD.FI.plot),
+                   control.FI.plot + theme(plot.margin = unit(c(0.25, 0, 0, 0.29), "cm"),
+                                        legend.position = "none"),
+                   get_legend(control.FI.plot),
+                   ncol = 4, align = "h", axis = "tb",
+                   rel_widths = c(1, 0.5, 1, 0.5))
+
+
+fig6 <- plot_grid(plot1, plot2 + theme(plot.margin = unit(c(0.1, 0, 0, 0), "cm")), 
+                  plot3 + theme(plot.margin = unit(c(0.4, 0, 0, 0), "cm")),
+                   ncol = 1, align = "v",
+                   rel_heights = c(0.85, 0.79, 0.76)) 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/figure6.png", fig6, height = 147, width = 183,
+       units = "mm")
+```
+
+# Soure Data Fig. 6
+```{r}
+fig6b.source <- cellect.RNA[, 1:5]
+fig6c.source <- cellect.ATAC[, 1:5]
+colnames(fig6b.source)[1] <- colnames(fig6c.source)[1] <- "cell_population"
+fig6b.source$cell_population <- gsub(" ", "_", fig6b.source$cell_population)
+fig6c.source$cell_population <- gsub(" ", "_", fig6c.source$cell_population)
+
+source.data6 <- list()
+source.data6 <- list.append(source.data6, fig6b.source)
+source.data6 <- list.append(source.data6, fig6c.source)
+
+fig6f.source <- DREADD.FI
+colnames(fig6f.source) <- gsub("CalcrDqCNO", "Calcr-Dq_CNO_", colnames(fig6f.source))
+colnames(fig6f.source) <- gsub("CalcrDqS", "Calcr-Dq_saline_", colnames(fig6f.source))
+fig6f.source <- cbind(hour = as.numeric(rownames(fig6f.source)), fig6f.source)
+source.data6 <- list.append(source.data6, fig6f.source)
+
+fig6g.source <- control.FI
+colnames(fig6g.source) <- gsub("CalcrCNO", "Calcr_CNO_", colnames(fig6g.source))
+colnames(fig6g.source) <- gsub("CalcrS", "Calcr_saline_", colnames(fig6g.source))
+fig6g.source <- cbind(hour = as.numeric(rownames(fig6g.source)), fig6g.source)
+source.data6 <- list.append(source.data6, fig6g.source)
+
+
+names(source.data6) <- c("6b", "6c", "6f", "6g")
+write.xlsx(source.data6, file = "/projects/mludwig/Ludwig-2021/output/tables/Source_Data_Fig6.xlsx",
+           rowNames = F)
+```
+

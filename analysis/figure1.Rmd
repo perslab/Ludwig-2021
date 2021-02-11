@@ -1,0 +1,624 @@
+---
+title: "figure1"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(readxl)
+library(DESeq2)
+library(ggplot2)
+library(plotrix)
+library(gmodels)
+library(reshape2)
+library(ggpubr)
+library(ggrepel)
+library(openxlsx)
+library(rlist)
+library(dplyr)
+library(lme4)
+library(emmeans)
+library(cowplot)
+library(MASS)
+```
+
+# Load data
+```{r}
+# Body weight meta data
+BW.data <- read_xlsx("/projects/mludwig/Ludwig-2021/data/bulk/body_weight.xlsx")
+BW.data <- as.data.frame(BW.data)
+rownames(BW.data) <- BW.data$day
+BW.data <- BW.data[, -1]
+
+# Food intake meta data
+FI.data <- read_xlsx("/projects/mludwig/Ludwig-2021/data/bulk/food_intake.xlsx")
+FI.data <- as.data.frame(FI.data)
+rownames(FI.data) <- FI.data$day
+FI.data <- FI.data[, -1]
+
+# Treatment groups
+groups <- read.table(file = "/projects/mludwig/Ludwig-2021/data/bulk/groups_bulk.csv", header = T)
+
+# Bulk RNA-seq data from six brain areas
+path <- "/projects/mludwig/Ludwig-2021/data/bulk/GUS2016-142-NN_Tables.xlsx"
+sheetnames <- excel_sheets(path)
+sheets <- lapply(excel_sheets(path), read_excel, path = path)
+names(sheets) <- sheetnames
+counts <- sheets[[2]]
+idx.dup <- which(duplicated(counts$`Gene name`)) # Indices of duplicated gene names
+bulk.data <- counts[-idx.dup, -c(1:3)]
+rownames(bulk.data) <- counts$`Gene name`[-idx.dup]
+colnames(bulk.data) <- gsub("Arc", "ARH", colnames(bulk.data))
+colnames(bulk.data) <- gsub("PVN", "PVH", colnames(bulk.data))
+```
+
+# Fig. 1b
+```{r}
+# Mean and SEM
+BW.mean <- aggregate(t(BW.data), list(groups$treatment), mean)
+BW.sem <- aggregate(t(BW.data), list(groups$treatment), std.error)
+
+# Prepare data for plotting
+BW.mean <- melt(BW.mean, id.vars = c("Group.1"))
+BW.sem <- melt(BW.sem, id.vars = c("Group.1"))
+
+BW.summary <- cbind(BW.mean, BW.sem$value)
+colnames(BW.summary) <- c("treatment", "day", "BW", "SEM")
+
+BW.summary$treatment <- gsub("WM", "Weight-matched", BW.summary$treatment)
+BW.summary$treatment <- factor(BW.summary$treatment, levels = c("Semaglutide", "Liraglutide",
+                                                          "Weight-matched", "Vehicle"))
+BW.long <- BW.data
+BW.long$day <- rownames(BW.long)
+BW.long <- melt(BW.long, id.vars = "day")
+colnames(BW.long) <- c("day", "sample", "BW")
+BW.long$treatment <- groups$treatment[match(BW.long$sample, rownames(groups))]
+BW.long$treatment <- factor(BW.long$treatment, levels = c("Vehicle", "WM", "Semaglutide", "Liraglutide"))
+BW.long$day <- factor(BW.long$day)
+
+# Linear mixed effects model
+BW.model <- lmer(BW ~ treatment * day + (1|sample),
+            data=BW.long,
+            REML=T)
+
+# Least-squares means
+BW.model <- lsmeans(BW.model, pairwise ~ treatment | day, adjust = "bonferroni")
+BW.model <- test(BW.model$contrasts)
+
+BW.summary$p.adj <- NA
+BW.summary$p.adj[which(BW.summary$treatment == "Weight-matched")] <- BW.model$p.value[which(BW.model$contrast == "Vehicle - WM")]
+BW.summary$p.adj[which(BW.summary$treatment == "Semaglutide")] <- BW.model$p.value[which(BW.model$contrast == "Vehicle - Semaglutide")]
+BW.summary$p.adj[which(BW.summary$treatment == "Liraglutide")] <- BW.model$p.value[which(BW.model$contrast == "Vehicle - Liraglutide")]
+
+BW.summary$p.symbol <- ""
+BW.summary$p.symbol[which(BW.summary$p.adj < 0.05)] <- "*"
+BW.summary$p.symbol[which(BW.summary$p.adj < 0.01)] <- "**"
+BW.summary$p.symbol[which(BW.summary$p.adj < 0.001)] <- "***"
+
+# Asterisk position
+position <- c()
+for (i in (unique(BW.summary$day))) {
+  position <- c(position, max(BW.summary$BW[BW.summary$day == i] + BW.summary$SEM[BW.summary$day == i]))
+}
+position <- data.frame(day = unique(BW.summary$day), y = position)
+
+sema.signif <- BW.summary[which(BW.summary$treatment == "Semaglutide" & BW.summary$p.symbol != ""),]
+sema.signif$y <- position$y[which(position$day %in% sema.signif$day)]
+  
+lira.signif <- BW.summary[which(BW.summary$treatment == "Liraglutide" & BW.summary$p.symbol != ""),]
+lira.signif$y <- position$y[which(position$day %in% lira.signif$day)]
+
+WM.signif <- BW.summary[which(BW.summary$treatment == "Weight-matched" & BW.summary$p.symbol != ""),]
+WM.signif$y <- position$y[which(position$day %in% WM.signif$day)]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#C27D38", "#CCC591", "#BFBFBA", "#58635F")
+BW.plot <- ggplot(data = BW.summary, aes(x = day, y = BW, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = BW, ymax = BW+SEM), width = .1) +
+  geom_line(size = 0.4) +
+  geom_point(size = 1) +
+  xlab("Days") + 
+  scale_y_continuous(name = "Body weight (g)", limits = c(40, 70), 
+                     breaks = seq(40, 70, 5)) +
+  scale_color_manual(values = pal) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust = 1, face = "bold", size = 6),
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(-0.1, "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0, 0, -10, 0),
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  guides(col = guide_legend(nrow=2, byrow = T)) +
+  geom_text(aes(4, 67.6, label = "1st dosis", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 4, y = 67, xend = 4, yend = 64.6),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) +
+  geom_signif(y_position=c(WM.signif$y + 3), xmin=WM.signif$day, 
+              xmax=WM.signif$day, size = 0, textsize = 2,
+              annotation=WM.signif$p.symbol, fontface = "bold", colour = "#BFBFBA") +
+  geom_signif(y_position=c(lira.signif$y + 2), xmin=lira.signif$day, 
+              xmax=lira.signif$day, size = 0, textsize = 2,
+              annotation=lira.signif$p.symbol, fontface = "bold", colour = "#CCC591") +
+  geom_signif(y_position=c(sema.signif$y + 1), xmin=sema.signif$day, 
+              xmax=sema.signif$day, size = 0, textsize = 2,
+              annotation=sema.signif$p.symbol, fontface = "bold", colour = "#C27D38") 
+
+BW.plot
+```
+
+# Fig. 1c
+```{r}
+# Mean and SEM
+FI.mean <- aggregate(t(FI.data), list(groups$treatment), mean)
+FI.sem <- aggregate(t(FI.data), list(groups$treatment), std.error)
+
+# Prepare data for plotting
+FI.mean <- melt(FI.mean, id.vars = c("Group.1"))
+FI.sem <- melt(FI.sem, id.vars = c("Group.1"))
+
+FI.summary <- cbind(FI.mean, FI.sem$value)
+colnames(FI.summary) <- c("treatment", "day", "FI", "SEM")
+
+FI.summary$treatment <- gsub("WM", "Weight-matched", FI.summary$treatment)
+FI.summary$treatment <- factor(FI.summary$treatment, levels = c("Semaglutide", "Liraglutide",
+                                                          "Weight-matched", "Vehicle"))
+
+
+FI.long <- FI.data
+FI.long$day <- rownames(FI.long)
+FI.long <- melt(FI.long, id.vars = "day")
+colnames(FI.long) <- c("day", "sample", "FI")
+FI.long$treatment <- groups$treatment[match(FI.long$sample, rownames(groups))]
+FI.long$treatment <- factor(FI.long$treatment, levels = c("Vehicle", "WM", "Semaglutide", "Liraglutide"))
+FI.long$day <- factor(FI.long$day)
+
+# Linear mixed effects model
+FI.model <- lmer(FI ~ treatment * day + (1|sample),
+            data=FI.long,
+            REML=TRUE)
+
+# Least-squares means
+FI.model <- lsmeans(FI.model, pairwise ~ treatment | day, adjust = "bonferroni")
+FI.model <- summary(FI.model$contrasts)
+
+FI.summary$p.adj <- NA
+FI.summary$p.adj[which(FI.summary$treatment == "Weight-matched")] <- FI.model$p.value[which(FI.model$contrast == "Vehicle - WM")]
+FI.summary$p.adj[which(FI.summary$treatment == "Semaglutide")] <- FI.model$p.value[which(FI.model$contrast == "Vehicle - Semaglutide")]
+FI.summary$p.adj[which(FI.summary$treatment == "Liraglutide")] <- FI.model$p.value[which(FI.model$contrast == "Vehicle - Liraglutide")]
+
+FI.summary$p.symbol <- ""
+FI.summary$p.symbol[which(FI.summary$p.adj < 0.05)] <- "*"
+FI.summary$p.symbol[which(FI.summary$p.adj < 0.01)] <- "**"
+FI.summary$p.symbol[which(FI.summary$p.adj < 0.001)] <- "***"
+
+# Asterisk position
+position1 <- c()
+for (i in (unique(FI.summary$day))) {
+  position1 <- c(position1, max(FI.summary$FI[FI.summary$day == i] + FI.summary$SEM[FI.summary$day == i]))
+}
+position1 <- data.frame(day = unique(FI.summary$day), y = position1)
+
+sema.signif1 <- FI.summary[which(FI.summary$treatment == "Semaglutide" & FI.summary$p.symbol != ""),]
+sema.signif1$y <- position1$y[which(position1$day %in% sema.signif1$day)]
+
+lira.signif1 <- FI.summary[which(FI.summary$treatment == "Liraglutide" & FI.summary$p.symbol != ""),]
+lira.signif1$y <- position1$y[which(position1$day %in% lira.signif1$day)]
+
+WM.signif1 <- FI.summary[which(FI.summary$treatment == "Weight-matched" & FI.summary$p.symbol != ""),]
+WM.signif1$y <- position1$y[which(position1$day %in% WM.signif1$day)]
+
+
+FI.summary$p.adj2 <- NA
+FI.summary$p.adj2[which(FI.summary$treatment == "Semaglutide")] <- FI.model$p.value[which(FI.model$contrast == "WM - Semaglutide")]
+FI.summary$p.adj2[which(FI.summary$treatment == "Liraglutide")] <- FI.model$p.value[which(FI.model$contrast == "WM - Liraglutide")]
+
+FI.summary$p.symbol2 <- ""
+FI.summary$p.symbol2[which(FI.summary$p.adj2 < 0.05)] <- "#"
+FI.summary$p.symbol2[which(FI.summary$p.adj2 < 0.01)] <- "##"
+FI.summary$p.symbol2[which(FI.summary$p.adj2 < 0.001)] <- "###"
+
+position2 <- c()
+for (i in (unique(FI.summary$day))) {
+  position2 <- c(position2, max(FI.summary$FI[FI.summary$day == i & FI.summary$treatment != "Vehicle"] + 
+                                  FI.summary$SEM[FI.summary$day == i & FI.summary$treatment != "Vehicle"]))
+}
+position2 <- data.frame(day = unique(FI.summary$day), y = position2)
+
+sema.signif2 <- FI.summary[which(FI.summary$treatment == "Semaglutide" & FI.summary$p.symbol2 != ""),]
+sema.signif2$y <- position2$y[which(position2$day %in% sema.signif2$day)]
+
+lira.signif2 <- FI.summary[which(FI.summary$treatment == "Liraglutide" & FI.summary$p.symbol2 != ""),]
+lira.signif2$y <- position2$y[which(position2$day %in% lira.signif2$day)]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#C27D38", "#CCC591", "#BFBFBA", "#58635F")
+FI.plot <- ggplot(data = FI.summary, aes(x = day, y = FI, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .2) +
+  geom_line(size = 0.4) +
+  geom_point(size = 1) +
+  xlab("Days") +
+  scale_y_continuous(name = "Food intake (g)", limits = c(0, 5), 
+                     breaks = seq(0, 5, 1)) +
+  scale_color_manual(values = pal) +
+  theme_pubr(legend="top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust = 1, face = "bold", size = 6),
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(-0.1, "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0),
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  guides(col = guide_legend(title = "Treatment", nrow=2, byrow = T)) +
+  geom_text(aes(3, 4.6, label = "1st dosis", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 3, y = 4.5, xend = 3, yend = 4.1), show.legend = F,
+                  arrow = arrow(length = unit(0.08, "cm")), colour = "black", size = 0.05) +
+  geom_signif(y_position=c(WM.signif1$y + 0.45), xmin=WM.signif1$day, 
+              xmax=WM.signif1$day, size = 0, textsize = 2,
+              annotation=WM.signif1$p.symbol, fontface = "bold", colour = "#BFBFBA") +
+  geom_signif(y_position=c(lira.signif1$y + 0.3), xmin=lira.signif1$day, 
+              xmax=lira.signif1$day, size = 0, textsize = 2,
+              annotation=lira.signif1$p.symbol, fontface = "bold", colour = "#CCC591") +
+  geom_signif(y_position=c(sema.signif1$y + 0.15), xmin=sema.signif1$day, 
+              xmax=sema.signif1$day, size = 0, textsize = 2,
+              annotation=sema.signif1$p.symbol, fontface = "bold", colour = "#C27D38") +
+  geom_signif(y_position=c(lira.signif2$y + 0.30), xmin=lira.signif2$day, 
+              xmax=lira.signif2$day, size = 0, textsize = 1,
+              annotation=lira.signif2$p.symbol2, fontface = "bold", colour = "#CCC591") +
+  geom_signif(y_position=c(sema.signif2$y + 0.15), xmin=sema.signif2$day, 
+              xmax=sema.signif2$day, size = 0, textsize = 1,
+              annotation=sema.signif2$p.symbol2, fontface = "bold", colour = "#C27D38") 
+FI.plot
+```
+
+# Fig. 1d
+```{r}
+area <- gsub("_.*", "", colnames(bulk.data))
+treatment <- gsub(".*_", "", colnames(bulk.data))
+treatment <- gsub(" .*", "", treatment)
+
+# Variance stabilizing transformation
+# dds <- DESeqDataSetFromMatrix(bulk.data, DataFrame(area), ~ area)
+# dds <- DESeq(dds)
+
+# vsd <- vst(dds, blind=FALSE)
+# saveRDS(vsd, file = "/projects/mludwig/Ludwig-2021/output/bulk/vsd_six_brain_areas.rds")
+vsd <- readRDS(file = "/projects/mludwig/Ludwig-2021/output/bulk/vsd_six_brain_areas.rds")
+
+# PCA
+pca.data <- plotPCA(vsd, intgroup=c("area"), returnData=TRUE)
+percent.var <- round(100 * attr(pca.data, "percentVar"))
+pca.data$area <- factor(pca.data$area, levels = c("AP", "NTS", "ARH", "DMH", "PVH", "LS"))
+
+
+pal <- c("#50844E", "#874B69", "#62A396", "#BF4747", "#5C5087", "#477DA8")
+
+label <- data.frame(area = unique(pca.data$area))
+label <- pca.data %>% 
+  dplyr::group_by(area) %>% 
+  dplyr::summarize(x = median(PC1), y = median(PC2)) 
+
+# Plot
+pca.plot <- ggplot(pca.data, aes(PC1, PC2, color = area)) +
+  geom_point(size = 2) +
+  xlab(paste0("PC1 (", percent.var[1], "% variance)")) +
+  ylab(paste0("PC2 (", percent.var[2], "% variance)")) + 
+  scale_color_manual(values = pal) +
+  theme_pubr() + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black", size = 0.4),
+                     axis.text = element_text(hjust = 1, face = "bold", size = 6),
+                     axis.title = element_text(size=6, face = "bold"),
+                     legend.position = "None") +   
+  geom_text_repel(data = label, aes(label = area, x=x, y=y), 
+                  size=2, fontface="bold", inherit.aes = F, force = 45) +
+  scale_x_continuous(breaks = seq(-30, 30, 10))
+pca.plot
+```
+
+# Supplementary Data 1
+```{r}
+# Brain areas
+area <- c("AP", "NTS", "ARH", "DMH", "PVH", "LS")
+treatment <- c("Semaglutide", "Liraglutide", "Vehicle")
+
+supp.data1 <- list()
+
+for (i in area) {
+  for (j in treatment) {
+  
+  count.data <- as.matrix(bulk.data[, grep(i, colnames(bulk.data))])
+  rownames(count.data) <- rownames(bulk.data)
+  count.data <- count.data[, c(grep(j, colnames(count.data)), grep("WM", colnames(count.data)))]
+
+  condition <- factor(c(rep(j, length(grep(j, colnames(count.data)))), 
+                       rep('WM', length(grep("WM", colnames(count.data))))), 
+                     levels = c("WM", j))
+  
+  dds <- DESeqDataSetFromMatrix(count.data, DataFrame(condition), ~ condition)
+  dds <- DESeq(dds)
+  DEGs <- results(dds, name = paste0("condition_", j, "_vs_WM"))
+  
+  DEGs <- data.frame(DEGs)
+  DEGs <- DEGs[,c(2:3, 5:6)]
+  colnames(DEGs) <- c("log2_fold-change", "SE", "pvalue", "padj")
+  DEGs <- DEGs[which(DEGs$padj < 0.05),]
+  DEGs <- DEGs[order(abs(DEGs$`log2_fold-change`), decreasing = T),]
+  DEGs <- cbind(gene = rownames(DEGs), DEGs)
+
+  supp.data1 <- list.append(supp.data1, DEGs)
+  names(supp.data1)[length(supp.data1)] <- paste0(i, "_", tolower(j), "_vs_WM")
+  
+  }
+     
+    count.data <- as.matrix(bulk.data[, grep(i, colnames(bulk.data))])
+    rownames(count.data) <- rownames(bulk.data)    
+    count.data <- count.data[, c(grep("Semaglutide", colnames(count.data)), grep("Liraglutide", colnames(count.data)))]
+    condition <- factor(c(rep('sema', length(grep("Semaglutide", colnames(count.data)))), 
+                         rep('lira', length(grep("Liraglutide", colnames(count.data))))), 
+                       levels = c("lira", "sema"))
+    
+    dds <- DESeqDataSetFromMatrix(count.data, DataFrame(condition), ~ condition)
+    dds <- DESeq(dds)
+    DEGs <- results(dds, name="condition_sema_vs_lira") 
+    
+    
+    DEGs <- data.frame(DEGs)
+    DEGs <- DEGs[,c(2:3, 5:6)]
+    colnames(DEGs) <- c("log2_fold-change", "SE", "pvalue", "padj")
+    DEGs <- DEGs[which(DEGs$padj < 0.05),]
+
+    if (nrow(DEGs) > 0) {
+      DEGs <- DEGs[order(abs(DEGs$`log2_fold-change`), decreasing = T),]
+      DEGs <- cbind(gene = rownames(DEGs), DEGs)
+      supp.data1 <- list.append(supp.data1, DEGs)
+      names(supp.data1)[length(supp.data1)] <- paste0(i, "_", "semaglutide_vs_liraglutide")
+    }
+}
+
+write.xlsx(supp.data1, file = "/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data1.xlsx",
+           rowNames = F)
+```
+
+# Fig. 1e
+```{r}
+# Compute number of differentially expressed genes for all areas and treatment groups
+area <- c("AP", "NTS", "ARH", "DMH", "PVH", "LS")
+treatment <- c("Semaglutide", "Liraglutide", "Vehicle")
+
+DEGs.n <- data.frame(matrix(NA, nrow = 18, ncol = 3))
+colnames(DEGs.n) <- c("area", "treatment", "genes")
+DEGs.n <- data.frame(area = rep(area, times = rep(3, length(area))), treatment = rep(treatment, 3), genes = "")
+
+
+for (i in area) {
+  DEGs.sema <- read.xlsx("/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data1.xlsx",
+                         sheet = paste0(i, "_semaglutide_", "vs_", "WM"), rowNames = T)
+  DEGs.lira <- read.xlsx("/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data1.xlsx",
+                         sheet = paste0(i, "_liraglutide_", "vs_", "WM"), rowNames = T)  
+  DEGs.vehicle <- read.xlsx("/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data1.xlsx",
+                           sheet = paste0(i, "_vehicle_", "vs_", "WM"), rowNames = T)  
+  
+  DEGs.n$genes[which(DEGs.n$area == i & DEGs.n$treatment == "Semaglutide")] <- nrow(DEGs.sema)
+  DEGs.n$genes[which(DEGs.n$area == i & DEGs.n$treatment == "Liraglutide")] <- nrow(DEGs.lira)
+  DEGs.n$genes[which(DEGs.n$area == i & DEGs.n$treatment == "Vehicle")] <- nrow(DEGs.vehicle)
+
+
+
+}
+
+DEGs.n$genes <- as.numeric(DEGs.n$genes)
+DEGs.n$area <- factor(DEGs.n$area, levels = c("AP", "NTS", "ARH", "DMH", "PVH", "LS"))
+DEGs.n$treatment <- factor(DEGs.n$treatment, levels = c("Semaglutide", "Liraglutide", "Vehicle"))
+
+# Plot
+pal <- c("#C27D38", "#CCC591", "#58635F")
+DEGs.plot <- ggplot(DEGs.n, aes(x = area, y = genes, fill = treatment)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.5, color = "black", 
+           size = 0.3) +
+  scale_fill_manual(values = pal) +
+  xlab("") + ylab("Differentially expressed genes") +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust = 1, face = "bold", size = 6),
+        axis.text.x = element_text(angle = 45),
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(), 
+        legend.key.height = unit(0.1, "cm"),
+        legend.key.width = unit(0.2, "cm"),
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        legend.margin=margin(0, 0, 0, 0),
+        legend.box.margin=margin(0, 0, 5, 0),) 
+DEGs.plot
+```
+
+# Fig. 1f
+```{r}
+# Statistics for all genes comparing semaglutide to WM in the AP
+count.data <- as.matrix(bulk.data[, grep("AP", colnames(bulk.data))])
+rownames(count.data) <- rownames(bulk.data)
+count.data <- count.data[, c(grep("Semaglutide", colnames(count.data)), grep("WM", colnames(count.data)))]
+condition <- factor(c(rep('sema', length(grep("Semaglutide", colnames(count.data)))), 
+                     rep('WM', length(grep("WM", colnames(count.data))))), 
+                   levels = c("WM", "sema"))
+dds <- DESeqDataSetFromMatrix(count.data, DataFrame(condition), ~ condition)
+dds <- DESeq(dds)
+DEGs.sema <- results(dds, name="condition_sema_vs_WM") 
+
+# Statistics for all genes comparing liraglutide to WM in the AP
+count.data <- as.matrix(bulk.data[, grep("AP", colnames(bulk.data))])
+rownames(count.data) <- rownames(bulk.data)
+count.data <- count.data[, c(grep("Liraglutide", colnames(count.data)), grep("WM", colnames(count.data)))]
+condition <- factor(c(rep('lira', length(grep("Liraglutide", colnames(count.data)))), 
+                     rep('WM', length(grep("WM", colnames(count.data))))), 
+                   levels = c("WM", "lira"))
+dds <- DESeqDataSetFromMatrix(count.data, DataFrame(condition), ~ condition)
+dds <- DESeq(dds)
+DEGs.lira <- results(dds, name="condition_lira_vs_WM") 
+
+genes.sema <- rownames(DEGs.sema)[which(DEGs.sema$padj < 0.05)]
+genes.lira <- rownames(DEGs.lira)[which(DEGs.lira$padj < 0.05)]
+
+genes.union <- union(genes.sema, genes.lira)
+genes.intersect <- intersect(genes.sema, genes.lira)
+
+genes.comparison <- data.frame(cbind(DEGs.sema[genes.union, "log2FoldChange"], 
+                                     DEGs.lira[genes.union, "log2FoldChange"]))  
+
+rownames(genes.comparison) <- genes.union
+
+colnames(genes.comparison) <- c("Semaglutide", "Liraglutide")
+genes.comparison$treatment <- ""
+genes.comparison$treatment[which(genes.union %in% genes.sema)] <- "Semaglutide"
+genes.comparison$treatment[which(genes.union %in% genes.lira)] <- "Liraglutide"
+genes.comparison$treatment[which(genes.union %in% genes.intersect)] <- "Sema- &\nliraglutide"
+genes.comparison$treatment <- factor(genes.comparison$treatment, 
+                                     levels = c("Semaglutide", "Liraglutide", "Sema- &\nliraglutide"))
+
+genes.comparison <- genes.comparison[sample(nrow(genes.comparison)),]
+
+# Plot
+pal <- c("#C27D38", "#CCC591", "#5B1A18")
+genes.comparison.plot <- ggplot(genes.comparison, aes(x = Semaglutide, y = Liraglutide, fill = treatment)) + 
+  geom_point(shape = 21, size = 1.5, alpha = 1, stroke = 0.4)  +
+  xlim(-5,5) + ylim(-5,5) +
+  xlab(expression(bold(atop("Log"[2] *" fold-change semaglutide")))) +
+  ylab(expression(bold(atop("Log"[2] *" fold-change liraglutide")))) +
+  scale_fill_manual(values = pal) +
+  theme_pubr(legend="top") + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black", size = 0.4),
+                     axis.title.x = element_text(size=6, face="bold"),
+                     axis.title.y = element_text(size=6, face="bold",
+                                                 margin=unit(c(0,-0.3,0,0), "cm")),
+                     axis.text = element_text(size=6, face="bold"),
+                     legend.text = element_text(size=6, face="bold"),
+                     legend.title = element_blank(), 
+                     legend.spacing.x = unit(-0.005, "cm"),
+                     plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                     legend.margin=margin(0,0,0,0),
+                     legend.box.margin=margin(0,0,5,0),) 
+
+genes.comparison.plot
+```
+
+# Fig. 1g
+```{r}
+# Prepare data for plotting
+volcano <- DEGs.sema[!(is.na(DEGs.sema$padj)), ]
+volcano$label <- ""
+volcano$label[min_rank(volcano$padj) <= 10] <- rownames(volcano)[min_rank(volcano$padj) <= 10]
+volcano$col <- 4
+volcano$col[which(volcano$padj <= 0.05 & abs(volcano$log2FoldChange) >= 0.5)] <- 1
+volcano$col[which(volcano$padj <= 0.05 & abs(volcano$log2FoldChange) < 0.5)] <- 2
+volcano$col[which(volcano$padj > 0.05 & abs(volcano$log2FoldChange) >= 0.5)] <- 3
+volcano <- data.frame(volcano[, c("log2FoldChange", "padj", "col", "label")])
+
+# Plot
+volcano.plot <- ggplot(volcano, aes(y=(-log10(padj)), x=log2FoldChange, 
+                                    fill=factor(col), label=label)) +
+  xlab(expression(bold(paste(Log[2], " fold-change")))) + 
+  ylab(expression(paste(bold(-log[10]),bold("("), bolditalic("P"),
+                                   bold(")")))) + 
+  geom_point(shape = 21, size = 1.5, alpha = 1, stroke = 0.4) + 
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = c(-.5, .5), linetype = "dashed") + 
+  geom_text_repel(fontface="bold.italic", size=2, color = "black", max.overlaps = 20) + theme_pubr() + 
+      theme(legend.position = "none",
+            axis.title = element_text(size=6, face="bold"),
+            axis.text = element_text(size=6, face="bold"),
+            axis.line = element_line(colour = "black", size = 0.4),
+            plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  scale_fill_manual(values = c("1" = "#960000", "2" = "#CC9999", 
+                                   "3" = "grey40", "4" = "grey80")) 
+volcano.plot
+```
+
+# Combine all plots
+```{r}
+blank.plot <- ggplot() + geom_blank(aes(0.1,0.1)) + 
+  cowplot::theme_nothing()
+
+plot1 <- plot_grid(BW.plot + theme(plot.margin = unit(c(0, 0.2, 0, 0.1), "cm")), 
+                   FI.plot + theme(plot.margin = unit(c(0, 0.2, 0, 0.5), "cm")),
+                   pca.plot + theme(plot.margin = unit(c(0, 0, 0, 0.2), "cm")),
+                   ncol = 3, align = "h",
+                   rel_widths = c(1,1,1), axis = "b") 
+
+plot2 <- plot_grid(blank.plot, get_legend(DEGs.plot), 
+                   blank.plot, get_legend(genes.comparison.plot),
+                   ncol = 4, align = "tb",
+                   rel_widths = c(0.1, 0.9, 0.1, 0.9)) 
+plot3 <- plot_grid(DEGs.plot + theme(legend.position = "none",
+                                     plot.margin = unit(c(0, 0.2, 0, 0), "cm")), 
+                   genes.comparison.plot + theme(legend.position = "none",
+                                              plot.margin = unit(c(0, 0, 0, 0.2), "cm")),
+                   ncol = 2, align = "h",
+                   rel_widths = c(1,1), axis = "b") 
+plot4 <- plot_grid(plot2, 
+                   plot3, 
+                   ncol = 1, align = "v",
+                    rel_heights = c(0.1, 1), axis = "vh") 
+
+plot5 <- plot_grid(plot4 + theme(plot.margin = unit(c(0, 0.2, -0.455, 0), "cm")),
+                   volcano.plot + theme(plot.margin = unit(c(0, 0, 0, 0.2), "cm")), 
+                   ncol = 2, align = "t",
+                   rel_widths = c(2,1)) 
+
+fig1 <-  plot_grid(plot1, plot5 + theme(plot.margin = unit(c(0.5, 0, 0, 0), "cm")), 
+                   ncol = 1, align = "v",
+                   rel_heights = c(1, 1)) 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/figure1.png", fig1, height = 120, width = 183,
+       units = "mm")
+```
+
+# Source data fig.1
+```{r}
+source.data1 <- list()
+
+fig1b.source <- BW.data
+colnames(fig1b.source) <- paste0(groups$treatment, "_", rownames(groups))  
+colnames(fig1b.source) <- gsub("Semaglutide", "semaglutide", colnames(fig1b.source))
+colnames(fig1b.source) <- gsub("Liraglutide", "liraglutide", colnames(fig1b.source))
+colnames(fig1b.source) <- gsub("Vehicle", "vehicle", colnames(fig1b.source))
+fig1b.source <- cbind(day = as.numeric(rownames(fig1b.source)), fig1b.source)
+
+source.data1 <- list.append(source.data1, fig1b.source)
+
+fig1c.source <- FI.data
+colnames(fig1c.source) <- paste0(groups$treatment, "_", rownames(groups))  
+colnames(fig1c.source) <- gsub("Semaglutide", "semaglutide", colnames(fig1c.source))
+colnames(fig1c.source) <- gsub("Liraglutide", "liraglutide", colnames(fig1c.source))
+colnames(fig1c.source) <- gsub("Vehicle", "vehicle", colnames(fig1c.source))
+fig1c.source <- cbind(day = as.numeric(rownames(fig1c.source)), fig1c.source)
+source.data1 <- list.append(source.data1, fig1c.source)
+
+names(source.data1) <- c("1b", "1c")
+write.xlsx(source.data1, file = "/projects/mludwig/Ludwig-2021/output/tables/Source_Data_Fig1.xlsx",
+           rowNames = F)
+```
+

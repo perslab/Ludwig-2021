@@ -1,0 +1,106 @@
+---
+title: "figure3"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(reshape2)
+library(wesanderson)
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+```
+
+# Load data
+```{r}
+neuron.type.info <- readRDS("/projects/mludwig/Ludwig-2021/output/AUCell/neuron_type_info.rds")
+```
+
+# Fig. 3b
+```{r}
+# Load CELLEX values
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram2.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex) <- neuron.type.info$cell.type2[match(colnames(cellex),
+                                                           neuron.type.info$cell.type)]
+
+genes <- c("Glp1r", "Gfral", "Calcr", "Ramp3", "Gipr", "Gcg", "Lepr", 
+           "Cckar", "Cckbr", "Cck", "Mc4r", "Bdnf")
+expression <- cellex[genes,]
+expression$gene <- rownames(expression)
+expression <- melt(expression, id.vars = "gene")
+colnames(expression) <- c("gene", "cell.type", "cellex.score")
+expression$cell.type <- factor(expression$cell.type, levels = neuron.type.info$cell.type2)
+expression$gene <- factor(expression$gene, levels = rev(genes))
+
+pal <- wes_palette("Rushmore1", 5, type = "discrete")
+
+# Plot CELLEX values
+heatmap.plot <- ggplot(expression, aes(x = cell.type, y = gene)) +
+    geom_tile(size = 2, color = "white", fill = "grey99") +
+    geom_point(aes(color = cellex.score), size = 2.5) +
+    scale_color_continuous(low = pal[[4]], high = pal[[1]],
+                          breaks = c(seq(0, 1, 0.25)), limits = c(0,1)) +
+    guides(col = guide_legend(title = expression(bolditalic(paste("ES"[mu]))))) +
+  theme_pubr(legend = "top") + 
+  xlab(NULL) + ylab(NULL) +
+  theme(axis.text.y = element_text(size=6, face="bold.italic"),
+        axis.text.x = element_blank(),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_text(size=6, face="bold"),
+        legend.key.width = unit(-0.05, "cm"),
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.ticks.x = element_blank(),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0), "cm"), 
+        panel.grid.minor = element_blank())
+
+# Plot DVC origin
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2,
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area)] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area)] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area)] <- 1
+
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("DMV", "NTS", "AP"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = neuron.type.info$cell.type2)
+
+
+brain.area.plot <- ggplot(brain.area, aes(x = cell.type2, y = area)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size), color="grey60", shape=15) + 
+  scale_size(range = c(0,2)) +
+  scale_color_manual(values = "black") +
+  theme_pubr() + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6, face="bold"), 
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.position = "none",
+        axis.line = element_line(colour = "black", size = 0.4),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0.5), "cm")) 
+  
+# Combined plots
+blank.plot <- ggplot() + geom_blank(aes(1,1)) + 
+  cowplot::theme_nothing()
+
+plot1 <- plot_grid(heatmap.plot + theme(legend.position = "none"),
+                   brain.area.plot,
+                   align = "v", ncol = 1, rel_heights = c(1, 0.4),
+                   axis = "vh")
+plot2 <- plot_grid(get_legend(heatmap.plot), plot1,
+                   align = "v", ncol = 1, rel_heights = c(0.15, 1.3),
+                   axis = "vh")
+fig3 <- plot_grid(blank.plot, plot2, ncol = 2, align = "h",
+                    rel_widths = c(1, 1.7), axis = "vh") 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/figure3.png", fig3, height = 60, width = 183,
+       units = "mm")
+```

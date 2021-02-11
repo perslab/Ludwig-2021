@@ -1,0 +1,668 @@
+---
+title: "figure2"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(Seurat)
+library(ggrepel)
+library(ggsci)
+library(scales)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(cowplot)
+library(reshape2)
+library(openxlsx)
+library(rlist)
+library(readxl)
+library(DESeq2)
+library(doMC)
+registerDoMC(25)
+```
+
+# Load data
+```{r}
+# snRNA-seq Seurat objects
+AP <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj.rds")
+neurons <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_Seurat_obj.rds")
+
+# Neuron cell population annotations
+neuron.type.info <- readRDS("/projects/mludwig/Ludwig-2021/output/AUCell/neuron_type_info.rds")
+neurons$cell.subtype2 <- neuron.type.info$cell.type2[match(neurons$cell.subtype,
+                                                           neuron.type.info$cell.type)]
+neurons$cell.subtype2 <- factor(neurons$cell.subtype2, 
+                                      levels = neuron.type.info$cell.type2)
+```
+
+# Fig. 2b
+```{r}
+umap.embed.AP <- as.data.frame(AP@reductions$umap@cell.embeddings)
+umap.embed.AP$cell.type <- AP$cell.type
+label <- data.frame(cell.type = unique(umap.embed.AP$cell.type))
+label <- umap.embed.AP %>% 
+  dplyr::group_by(cell.type) %>% 
+  dplyr::summarize(x = median(UMAP_1), y = median(UMAP_2)) 
+
+# Plot
+AP.umap.plot <- ggplot(data = umap.embed.AP, mapping = aes(x = UMAP_1, y = UMAP_2, 
+                                                           colour = cell.type)) +
+  geom_point(size = 1, alpha = 0.5) +
+  theme_pubr() +
+  theme(axis.line = element_line(colour = "black", size = 0.4), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(), 
+        legend.position = "None",
+        axis.title = element_text(size=6, face="bold"),
+        axis.text = element_text(size=6, face="bold")) + 
+  xlab("UMAP 1") + ylab("UMAP 2") + 
+  scale_color_futurama(alpha = 0.2) +
+  geom_text_repel(data = label, aes(label = cell.type, x=x, y=y), 
+                  size=2, fontface="bold", inherit.aes = F) 
+AP.umap.plot
+```
+
+# Fig. 2c
+```{r}
+# Load CELLEX data
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram1.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex) <- gsub("\\.", " ", colnames(cellex))
+colnames(cellex) <- gsub("Tanycyte like cells", "Tanycyte-like cells", colnames(cellex))
+
+# Marker genes from Campbell et al. 2017, 
+# Romanov et al. 2017, and Chen et al. 2017
+marker.genes <- list()
+marker.genes[["Astrocytes"]] <- c("Gfap",  "Fabp7", "Ntsr2", "Agt")
+marker.genes[["Endothelial cells"]] <- c("Slco1c1", "Fn1", "Slco1a4", "Cldn5", "Slc38a5", "Myh11")
+marker.genes[["Ependymal cells"]]  <- c("Ccdc153", "Enkur9", "Foxj1", "Ccdc153")
+marker.genes[["Microglia"]] <- c("Aif1", "Fcer1g", "C1qa", "Cx3cr1")
+marker.genes[["Oligodendrocytes"]]  <- c("Mag", "Mbp", "Ugt8", "Mobp")
+marker.genes[["OPCs"]]  <- c("Cspg4", "Pdgfra")
+marker.genes[["Tanycyte-like cells"]] <- "Wt1" # Top CELLEX marker
+marker.genes[["VLMCs"]] <- "Lum"
+
+cell.types <- levels(AP$cell.type)
+cell.types <- cell.types[!(cell.types == "Neurons")]
+
+
+# Plot gene expression 
+for (i in 1:length(cell.types)) {
+  
+  cell.type <- cell.types[i]
+  
+  gene <- marker.genes[[cell.type]][which.max(cellex[marker.genes[[cell.type]], cell.type])]
+
+  gene.expr <- data.frame(expression = AP@assays$RNA@data[gene,], 
+                          cell.type = AP$cell.type)
+  gene.expr <- gene.expr[!(gene.expr$cell.type == "Neurons"),]
+  
+  if (cell.type == "Tanycyte-like cells") {
+     
+    violin.plot <- ggplot(gene.expr, aes(x=factor(cell.type), y=expression, 
+                                      fill = cell.type)) + 
+      geom_violin(scale = "width", adjust = 2, show.legend = F, size = 0.2) +
+      theme_pubr() +
+      theme(panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(), 
+            axis.line = element_line(colour = "black", size=0.4),
+            axis.text.y = element_text(size=6, face="bold"),
+            axis.text.x = element_blank(),
+            axis.title.y = element_text(size=6, face="bold.italic", angle = 360, 
+                                        colour = "darkred", vjust = 0.5,
+                                         margin=unit(c(0,-0.3,0,0), "cm")),
+            axis.ticks.x = element_blank(),
+            # margin: top, right, bottom, and left
+            plot.margin=unit(c(0.1,0,-.5,0), "cm")) +
+      xlab("") + ylab(gene) + 
+      scale_fill_manual(values = pal_futurama("planetexpress", alpha = 1)(9)[-5]) + 
+      scale_y_continuous(breaks = c(0, floor(max(gene.expr$expression))))
+  }
+  
+  else if (i < length(cell.types)) {
+    
+    violin.plot <- ggplot(gene.expr, aes(x=factor(cell.type), y=expression, 
+                                      fill = cell.type)) + 
+      geom_violin(scale = "width", adjust = 2, show.legend = F, size = 0.2) +
+      theme_pubr() +
+      theme(panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(), 
+            axis.line = element_line(colour = "black", size = 0.4),
+            axis.text.y = element_text(size=6, face="bold"),
+            axis.text.x = element_blank(),
+            axis.title.y = element_text(size=6, face="bold.italic", angle = 360, vjust = 0.5,
+                                         margin=unit(c(0,-0.3,0,0), "cm")),
+            axis.ticks.x = element_blank(),
+            # margin: top, right, bottom, and left
+            plot.margin=unit(c(0.1,0,-.5,0), "cm")) +
+      xlab("") + ylab(gene) + 
+      scale_fill_manual(values = pal_futurama("planetexpress", alpha = 1)(9)[-5]) + 
+      scale_y_continuous(breaks = c(0, floor(max(gene.expr$expression))))
+  }
+  
+  else {
+    violin.plot <- ggplot(gene.expr, aes(x=factor(cell.type), y=expression, fill = cell.type)) + 
+      geom_violin(scale = "width", adjust = 2, show.legend = F, size = 0.2) +
+      theme_pubr() +
+      theme(panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(), 
+            axis.line = element_line(colour = "black", size = 0.4),
+            axis.text.y = element_text(size=6, face="bold"),
+            axis.text.x = element_text(size=6, face="bold", angle=45, hjust=1),
+            axis.title.y = element_text(size=6, face="bold.italic", angle = 360, vjust = 0.5,
+                                         margin=unit(c(0,-0.3,0,0), "cm")),
+            # margin: top, right, bottom, and left
+            plot.margin=unit(c(0.1,0,-.5,0), "cm")) +
+      xlab("") + ylab(gene) + 
+      scale_fill_manual(values = pal_futurama("planetexpress", alpha = 1)(9)[-5]) + 
+      scale_y_continuous(breaks = c(0, floor(max(gene.expr$expression))))
+    
+  }
+    assign(paste0("violin.plot", i), violin.plot)
+
+}
+
+# Plot number of cells 
+n.cells <- data.frame(cell.type = levels(AP$cell.type), 
+                      n.cells = data.frame(table(AP$cell.type))$Freq)
+n.cells <- n.cells[!(n.cells$cell.type == "Neurons"),]
+n.cells$cell.type <- factor(n.cells$cell.type, levels = levels(AP$cell.type))
+
+n.cells.plot <- ggplot(n.cells, aes(x = cell.type, y = n.cells)) + 
+  geom_bar(stat = "identity", color = "black", fill = "darkgrey",
+           width = 0.5, position = position_dodge(0.1), size = 0.2) +
+  xlab("") + ylab(expression(paste(bolditalic(n)~bold(cells)))) +
+  theme_pubr() + 
+  theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                      axis.line = element_line(colour = "black", size = 0.4),
+                     axis.text.x = element_blank(),
+                     axis.text.y = element_text(size=6, face="bold"),
+                     axis.title.y = element_text(size=6, face="bold",
+                                                 margin=unit(c(0,-0.3,0,0), "cm")),
+                     plot.margin = unit(c(0, 0, -0.5, 0), "cm")) +
+  scale_y_continuous(breaks = seq(0, max(n.cells$n.cells), 4000))
+
+# Combine plots
+AP.marker.plot <- plot_grid(n.cells.plot, violin.plot1, violin.plot2, violin.plot3,
+          violin.plot4, violin.plot5, violin.plot6, violin.plot7,
+          violin.plot8,
+          align = "v", ncol = 1, rel_heights = c(1.5, rep(0.8,7), 3.7))
+
+AP.marker.plot
+```
+
+# Fig. 2d
+```{r}
+pal <- c("#E64B35", "#4DBBD5", "#2B9BB5", "#6681BD", "#8491B4", 
+         "#F39B7F", "#91D1C2", "#DC0000", "#7E6148", "#B09C85", 
+         "#F7C1BA", "#AAE2F0", "#9BAAD4", "#7296e0", "#D47557", "#72A69E",
+         "#6ABAA7", "#A12525", "#736558", "#BFA280", "#EB6B59", "#ABCAD1",
+         "#95C2BB", "#00A087", "#BD5D3E")
+saveRDS(pal, file = "/projects/mludwig/Ludwig-2021/output/plots_general/pal_subpopulations.rds")
+
+
+umap.embed.neurons <- as.data.frame(neurons@reductions$umap@cell.embeddings)
+umap.embed.neurons$cell.type <- neurons$cell.subtype2
+label <- data.frame(cell.type = unique(umap.embed.neurons$cell.type))
+label <- umap.embed.neurons %>% 
+  dplyr::group_by(cell.type) %>% 
+  dplyr::summarize(x = median(UMAP_1), y = median(UMAP_2)) 
+
+# Plot
+neurons.umap.plot <- ggplot(data = umap.embed.neurons, 
+                            mapping = aes(x = UMAP_1, y = UMAP_2, colour = cell.type)) +
+  geom_point(size = 1, alpha = 0.5) +
+  theme_pubr() +
+  theme(axis.line = element_line(colour = "black", size = 0.4), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(), 
+        legend.position = "None",
+        axis.title = element_text(size=6, face="bold"),
+        axis.text = element_text(size=6, face="bold")) +
+    scale_color_manual(values = pal) +
+  xlab("UMAP 1") + ylab("UMAP 2") + 
+  geom_text_repel(data = label, aes(label = cell.type, x=x, y=y), 
+                  size=2, fontface="bold", inherit.aes = F)
+
+neurons.umap.plot
+```
+
+# Fig. 2e
+```{r}
+#  Load bulk data from multiple brain areas
+path <- "/projects/mludwig/Ludwig-2021/data/bulk/GUS2016-142-NN_Tables.xlsx"
+sheetnames <- excel_sheets(path)
+sheets <- lapply(excel_sheets(path), read_excel, path = path)
+names(sheets) <- sheetnames
+counts <- sheets[[2]]
+
+# Extract AP and NTS from data matrix
+idx.dup <- which(duplicated(counts$`Gene name`))
+
+AP.bulk <- counts[-idx.dup, grep("AP", colnames(counts))]
+AP.bulk <- as.matrix(AP.bulk)
+rownames(AP.bulk) = counts$`Gene name`[-idx.dup]
+
+NTS.bulk <- counts[-idx.dup, grep("NTS", colnames(counts))]
+NTS.bulk <- as.matrix(NTS.bulk)
+rownames(NTS.bulk) = counts$`Gene name`[-idx.dup]
+
+# Compute AP and NTS marker genes 
+count.data <- cbind(AP.bulk, NTS.bulk)
+condition <- factor(c(rep('AP', length(grep("AP", colnames(count.data)))), 
+                      rep('NTS', length(grep("NTS", colnames(count.data))))), 
+                    levels = c("NTS", "AP"))
+
+
+dds <- DESeqDataSetFromMatrix(count.data, DataFrame(condition), ~ condition)
+dds <- DESeq(dds)
+DEGs <- results(dds, name="condition_AP_vs_NTS") 
+DEGs <- DEGs[which(DEGs$padj <= 0.05),]
+
+DEGs.AP <- DEGs[sign(DEGs$log2FoldChange) == 1,]
+DEGs.AP <- DEGs.AP[order(DEGs.AP$padj, decreasing = F)[1:1000],]
+DEGs.NTS <- DEGs[sign(DEGs$log2FoldChange) == -1,]
+DEGs.NTS <- DEGs.NTS[order(DEGs.NTS$padj, decreasing = F)[1:1000], ]
+
+# Load CELLEX values
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram2.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+cellex <- cellex[which(rownames(cellex) %in% rownames(AP.bulk)),]
+
+area <- list(AP = rownames(DEGs.AP), NTS = rownames(DEGs.NTS))
+
+# Matrix to store cell type specificity p-values
+n.cell.types <- ncol(cellex)
+p.values <- matrix(NA, length(area), n.cell.types) 
+rownames(p.values) <- names(area)
+colnames(p.values) <- colnames(cellex)
+
+
+
+# Loop over areas to compute cell population specificity
+for (i in names(area)) {
+  for (j in 1:ncol(cellex)) {
+    
+    all.genes <- rownames(cellex)
+    area.genes <- all.genes[which(all.genes %in% area[[i]])] 
+    cell.type.genes <- rownames(cellex)[which(cellex[, j] > 0)]
+    
+    overlap <- intersect(area.genes, cell.type.genes)
+    a <- length(overlap)
+    b <- length(cell.type.genes) - length(overlap)
+    c <- length(area.genes) - length(overlap)
+    d <- length(all.genes) - a - b - c
+      
+    con.table <- matrix(c(a, b, c, d), nrow = 2)
+    
+    fisher.p <- fisher.test(con.table, alternative = "greater")[["p.value"]]
+    p.values[i, j] <- fisher.p
+  } 
+}
+
+# Multiple testing adjustment
+area.enrich <- p.adjust(p.values, method = "bonferroni")
+dim(area.enrich) <- dim(p.values)
+dimnames(area.enrich) <- dimnames(p.values)
+
+# Prepare data for plotting 
+area.enrich <- melt(area.enrich)
+colnames(area.enrich) <- c("area", "cell.type", "p.adj")
+
+
+area.enrich$cell.type2 <- factor(area.enrich$cell.type,
+                                        levels = rev(neuron.type.info$cell.type2))
+
+area.enrich$cell.type2[which(area.enrich$cell.type %in% 
+                                 neuron.type.info$cell.type)] <-
+  neuron.type.info$cell.type2[na.omit(match(area.enrich$cell.type,
+                                            neuron.type.info$cell.type))]
+
+area.enrich$size <- -log10(area.enrich$p.adj)
+area.enrich$size[which(area.enrich$size < -log10(0.05))] <- NA
+
+
+
+# Plot DVC origin 
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2,
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area)] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area)] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area)] <- 1
+
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("AP", "NTS", "DMV"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = rev(neuron.type.info$cell.type2))
+
+
+brain.area.plot <- ggplot(brain.area, aes(x = area, y = cell.type2)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size), shape=15, color = "grey60") + scale_size(range = c(0,2), guide = F) +
+  theme_pubr(legend = "right") + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(size=6, face="bold", angle = 45, hjust = 1), 
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.text.y = element_blank(),
+        legend.position = "none",
+        legend.title = element_blank(),
+        legend.key.height = unit(-0.05, "cm"),
+        legend.spacing.x = unit(-0.05, "cm"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        axis.ticks.y = element_blank())
+brain.area.plot
+area.enrich.plot <- ggplot(area.enrich, aes(x = area, y = cell.type2, 
+                                            color = area)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size)) + 
+  scale_size(name = expression(paste(bold(-log[10]),bold("("),
+                                     bolditalic("P"),bold(")"))), 
+             breaks = c(10, 30, 50),
+             range = c(0, 2), limits = c(0, 60)) + 
+  theme_pubr(legend = "right") + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(size=6, angle = 45, hjust = 1, face="bold"), 
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.title = element_text(size=6, face="bold"), 
+        legend.text = element_text(size=6, face="bold"),
+        legend.key.height = unit(-0.05, "cm"),
+        axis.line = element_line(colour = "black", size = 0.4),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  scale_color_manual(values= c("#50844E", "#874B69"), guide = F) +
+  scale_x_discrete(labels = c("AP markers", "NTS markers")) 
+area.enrich.plot
+
+# Combine plot
+blank.plot <- ggplot() + geom_blank(aes(0.1,0.1)) + 
+  cowplot::theme_nothing()
+
+plot1 <- plot_grid(area.enrich.plot + theme(legend.position = "none"),
+                   brain.area.plot, 
+                   align = 'h', ncol = 2, 
+                   rel_widths = c(1.6, 1))
+
+
+plot2 <- plot_grid(blank.plot,
+                        get_legend(area.enrich.plot),
+                        blank.plot,
+                        align = "v", axis = "vh", ncol = 1, 
+                        rel_heights = c(0.5,1,1))
+
+area.plot <- plot_grid(plot1, plot2, ncol = 2, align = "h", axis = "vh", 
+                   rel_widths = c(3,1)) 
+area.plot
+```
+
+# Fig. 2f
+```{r}
+# Load CELLEX data
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram2.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex) <- neuron.type.info$cell.type2[match(colnames(cellex),
+                                                      neuron.type.info$cell.type)]
+
+# Only include genes that can be mapped to the human genome
+mapping.data1 <- read.table(gzfile("/projects/mludwig/Ludwig-2021/data/gene_info/Mus_musculus.GRCm38.90.gene_name_version2ensembl.txt.gz"), header = T)
+mapping.data2 <- read.table(gzfile("/projects/mludwig/Ludwig-2021/data/gene_info/map_hsapiens_mmusculus.gz"), header = T)
+genes.human <- rownames(cellex)
+genes.human <- mapping.data1$ensembl_gene_id[match(genes.human,
+                                                   mapping.data1$gene_name_optimal)]
+genes.human <- mapping.data2$ensembl_gene_id[match(genes.human,
+                                             mapping.data2$mmusculus_homolog_ensembl_gene)]
+
+cellex <- cellex[!(is.na(genes.human)), ]
+
+# Plot neurotransmitter marker expression
+genes <- c("Chat", "Slc32a1", "Slc17a6", "Th", "Ddc", "Dbh")
+for (i in 1:length(genes)) {
+  
+  gene <- genes[i]
+  gene.expr <- data.frame(expression = neurons@assays$RNA@data[gene,], 
+                          cell.type = neurons$cell.subtype2)
+  levels(gene.expr$cell.type)
+
+  violin.plot <- ggplot(gene.expr, aes(x=cell.type, y=expression, fill = cell.type)) + 
+    geom_violin(scale = "width", adjust = 2, show.legend = F, size = 0.2) +
+    theme_pubr() +
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_line(colour = "black", size = 0.4),
+          axis.text.x = element_blank(),
+          axis.text.y = element_text(size=6, face="bold"),
+          axis.title.y = element_text(size=6, face="bold.italic", angle = 360, vjust = 0.5,
+                                      margin=unit(c(0,-0.3,0,0), "cm")),
+          axis.ticks.x = element_blank(),
+          # margin: top, right, bottom, and left
+          plot.margin=unit(c(0.1,0,-.5,0), "cm")) +
+    xlab("") + ylab(gene) + 
+    scale_fill_manual(values = pal) + 
+    scale_y_continuous(breaks = c(0, floor(max(gene.expr$expression))))
+
+  assign(paste0("violin.plot", i), violin.plot)
+
+}
+
+# Plot marker gene expression
+for (i in 1:ncol(cellex)) {
+  
+  cell.type <- levels(neurons$cell.subtype2)[i]
+  
+  genes.ordered <- rownames(cellex)[order(cellex[, cell.type], decreasing = T)]
+
+  for (j in genes.ordered) {
+  idx <- which(neurons$cell.subtype2 == cell.type)
+  counts <- which(neurons@assays$RNA@counts[j, idx ] != 0)
+  fraction <- length(counts) / length(idx) * 100
+  if (fraction >= 10) {
+    gene <- j
+    break
+  }
+}
+
+  gene.expr <- data.frame(expression = neurons@assays$RNA@data[gene,], 
+                          cell.type = neurons$cell.subtype2)
+
+  violin.plot <- ggplot(gene.expr, aes(x=factor(cell.type), y=expression, 
+                                    fill = cell.type)) + 
+    geom_violin(scale = "width", adjust = 2, show.legend = F, size = 0.2) +
+    theme_pubr() +
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_line(colour = "black", size = 0.4),
+          axis.text.y = element_text(size=6, face="bold"),
+          axis.text.x = element_blank(),
+          axis.title.y = element_text(size=6, face="bold.italic", angle = 360, vjust = 0.5,
+                                      margin=unit(c(0,-0.3,0,0), "cm")),
+          axis.ticks.x = element_blank(),
+          # margin: top, right, bottom, and left
+          plot.margin=unit(c(0.1,0,-.5,0), "cm")) +
+    xlab("") + ylab(gene) + 
+    scale_fill_manual(values = pal) + 
+    scale_y_continuous(breaks = c(0, floor(max(gene.expr$expression))))
+  assign(paste0("violin.plot", (i+6)), violin.plot)
+
+}
+
+
+# Plot DVC origin 
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2,
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area)] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area)] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area)] <- 1
+
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("DMV", "NTS", "AP"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = neuron.type.info$cell.type2)
+
+
+brain.area.plot <- ggplot(brain.area, aes(x = cell.type2, y = area)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size), color="grey60", shape=15) + 
+  scale_size(range = c(0,2)) +
+  scale_color_manual(values = "black") +
+  theme_pubr() + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6, face="bold"), 
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.position = "none",
+        axis.line = element_line(colour = "black", size = 0.4),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0.5), "cm")) 
+
+
+# Plot number of cells 
+n.cells <- data.frame(cell.type2 = levels(neurons$cell.subtype2), 
+                      n.cells = data.frame(table(neurons$cell.subtype2))$Freq)
+n.cells$cell.type2 <- factor(n.cells$cell.type2, levels = levels(neurons$cell.subtype2))
+n.cells.plot <- ggplot(n.cells, aes(x = cell.type2, y = n.cells)) + 
+  geom_bar(stat = "identity", color = "black", fill = "darkgrey",
+           width = 0.5, position = position_dodge(0.1), size = 0.2) +
+  xlab("") + ylab(expression(paste(bolditalic(n)~bold(cells)))) +
+  theme_pubr() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black", size = 0.4),
+                     axis.text.x = element_blank(),
+                     axis.text.y = element_text(size=6, face="bold"),
+                     axis.title.y = element_text(size=6, face="bold",
+                                                 margin=unit(c(0,-0.3,0,0), "cm")),
+                     plot.margin = unit(c(0, 0, -0.5, 0), "cm")) +
+  scale_y_continuous(breaks = seq(0, max(n.cells$n.cells), 3000))
+
+neurons.marker.plot <- plot_grid(n.cells.plot, violin.plot1, violin.plot2, 
+                                 violin.plot3, violin.plot4,
+          violin.plot5, violin.plot6, violin.plot7, violin.plot8,
+          violin.plot9, violin.plot10, violin.plot11, violin.plot12,
+          violin.plot13, violin.plot14, violin.plot15, violin.plot16,
+          violin.plot17, violin.plot18, violin.plot19, violin.plot20,
+          violin.plot21, violin.plot22, violin.plot23, violin.plot24,
+          violin.plot25, violin.plot26, violin.plot27, violin.plot28,
+          violin.plot29, violin.plot30, violin.plot31, brain.area.plot,
+          align = "v", ncol = 1, rel_heights = c(1.7, rep(1, 31), 3.5))
+
+neurons.marker.plot
+```
+
+# Combine all plots
+```{r}
+plot1 <- plot_grid(AP.umap.plot + theme(plot.margin = unit(c(0, 0.3, 0, 0), "cm")), 
+                   AP.marker.plot + theme(plot.margin = unit(c(0, 0, 0, 0.3), "cm")), 
+                   ncol = 2, align = "h",
+                   rel_widths = c(1,0.8), axis = "t") 
+plot2 <- plot_grid(neurons.umap.plot + theme(plot.margin = unit(c(0, 0.3, 0, 0), "cm")),
+                   area.plot + theme(plot.margin = unit(c(0, 0, 0, 0.3), "cm")), 
+                   ncol = 2, align = "h",
+                   rel_widths = c(1,0.8), axis = "t") 
+plot3 <- plot_grid(blank.plot, plot1 + theme(plot.margin = unit(c(0, 0, 0.4, 0), "cm")), 
+                   plot2, ncol = 1, align = "v",
+                   rel_heights = c(0.7,1.05,1)) 
+fig2 <-  plot_grid(plot3, neurons.marker.plot, ncol = 2, align = "h",
+                   rel_widths = c(1, 0.7)) 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/figure2.png", fig2, height = 160, width = 183,
+       units = "mm")
+```
+
+# Supplemetary Data 2
+```{r}
+cellex.list <- list()
+
+# Load CELLEX data (glial populations)
+cellex.AP <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram1.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex.AP) <- gsub("\\.", " ", colnames(cellex.AP))
+colnames(cellex.AP) <- gsub("Tanycyte like cells", "Tanycyte-like cells", colnames(cellex.AP))
+
+# Load CELLEX data (neuronal populations)
+cellex.neurons <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram2.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex.neurons) <- neuron.type.info$cell.type2[match(colnames(cellex.neurons),
+                                                      neuron.type.info$cell.type)]
+cellex.neurons <- cellex.neurons[,levels(neurons$cell.subtype2)]
+
+
+cellex.list.glial <- foreach(i = colnames(cellex.AP)) %dopar% { 
+  idx <- which(cellex.AP[,i] != 0)
+  cellex.i <- data.frame(gene = rownames(cellex.AP)[idx],
+                         cellex_score = cellex.AP[idx,i])
+  idx <- which(AP$cell.type == i)
+  fraction <- c()
+  for (j in cellex.i$gene) {
+    counts <- which(AP@assays$RNA@counts[j, idx ] != 0)
+    fraction <- c(fraction, length(counts) / length(idx) * 100)
+  }
+  
+  cellex.i$expr_proportion <- fraction
+
+  cellex.i <- cellex.i[order(cellex.i$cellex_score, decreasing = T), ]
+  cellex.i
+}
+
+cellex.list.neurons <- foreach(i = colnames(cellex.neurons)) %dopar% {
+  idx <- which(cellex.neurons[,i] != 0)
+  cellex.i <- data.frame(gene = rownames(cellex.neurons)[idx],
+                         cellex_score = cellex.neurons[idx,i])
+  idx <- which(neurons$cell.subtype2 == i)
+  fraction <- c()
+  for (j in cellex.i$gene) {
+    counts <- which(neurons@assays$RNA@counts[j, idx ] != 0)
+    fraction <- c(fraction, length(counts) / length(idx) * 100)
+  }
+  
+  cellex.i$expr_proportion <- fraction
+  cellex.i <- cellex.i[order(cellex.i$cellex_score, decreasing = T), ]
+  cellex.i
+}
+
+cellex.list <- cellex.list.glial
+cellex.list[9:33] <- cellex.list.neurons
+names(cellex.list) <- c(gsub(" ", "_", colnames(cellex.AP)), colnames(cellex.neurons))
+
+write.xlsx(cellex.list, file = "/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data2.xlsx",
+           rowNames = F)
+```
+
+# Supplementary Data 3
+```{r}
+DEGs.AP2 <- data.frame(DEGs.AP[,c(2:3, 5:6)])
+colnames(DEGs.AP2) <- c("log2_fold-change", "SE", "pvalue", "padj")
+DEGs.AP2 <- DEGs.AP2[order(DEGs.AP2$`log2_fold-change`, decreasing = T),]
+DEGs.AP2 <- list(cbind(gene = rownames(DEGs.AP2), DEGs.AP2))
+
+
+DEGs.NTS2 <- data.frame(DEGs.NTS[,c(2:3, 5:6)])
+colnames(DEGs.NTS2) <- c("log2_fold-change", "SE", "pvalue", "padj")
+DEGs.NTS2$`log2_fold-change` <- DEGs.NTS2$`log2_fold-change` * (-1)
+DEGs.NTS2 <- DEGs.NTS2[order(DEGs.NTS2$`log2_fold-change`, decreasing = T),]
+DEGs.NTS2 <- list(cbind(gene = rownames(DEGs.NTS2), DEGs.NTS2))
+
+DEGs.list <- list.append(DEGs.AP2, DEGs.NTS2)
+
+names(DEGs.list) <- c("AP_markers", "NTS_markers")
+
+write.xlsx(DEGs.list, file = "/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data3.xlsx",
+           rowNames = F)
+```

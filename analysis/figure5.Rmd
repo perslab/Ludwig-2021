@@ -1,0 +1,834 @@
+---
+title: "figure5"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(SnapATAC)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggdendro)
+library(ggsci)
+library(plyr)
+library(reshape2)
+library(dplyr)
+library(dendextend)
+library(cowplot)
+library(data.table)
+library(rlist)
+library(openxlsx)
+library(plotrix)
+library(doMC)
+registerDoMC(20)
+source("/projects/mludwig/Ludwig-2021/code/motif_analysis.R")
+```
+
+# Load data
+```{r}
+# snATAC-seq data
+AP.peaks <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_peaks_Seurat_obj.rds")
+neurons.peaks <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_peaks_Seurat_obj.rds")
+bulk.neurons.peaks <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/bulk_neurons_peaks_Seurat_obj.rds")
+
+# snRNA-seq data
+AP <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_Seurat_obj.rds")
+
+# SnapATAC data
+x.sp <- readRDS("/projects/mludwig/Ludwig-2021/output/SnapATAC_objects/AP_SnapATAC_obj.rds")
+
+# Meta data
+TF.meta <- readRDS("/projects/mludwig/Ludwig-2021/data/gene_info/TF_metadata.rds")
+
+neuron.type.info <- readRDS("/projects/mludwig/Ludwig-2021/output/AUCell/neuron_type_info.rds")
+
+neurons.peaks$cell.subtype2 <- neuron.type.info$cell.type2[match(neurons.peaks$cell.subtype,
+                                                                 neuron.type.info$cell.type)]
+neurons.peaks$cell.subtype2 <- factor(neurons.peaks$cell.subtype2, 
+                                      levels = neuron.type.info$cell.type2
+                                      [which(neuron.type.info$cell.type2 %in%
+                                               neurons.peaks$cell.subtype2)])
+
+bulk.neurons.peaks$cell.type2 <- neuron.type.info$cell.type2[match(bulk.neurons.peaks$cell.type,
+                                                                 neuron.type.info$cell.type)]
+bulk.neurons.peaks$cell.type2 <- factor(bulk.neurons.peaks$cell.type2, 
+                                      levels = neuron.type.info$cell.type2
+                                      [which(neuron.type.info$cell.type2 %in%
+                                               bulk.neurons.peaks$cell.type2)])
+bulk.neurons.peaks$treatment.celltype2 <- paste0(bulk.neurons.peaks$treatment, "-", bulk.neurons.peaks$cell.type2)
+```
+
+# Fig. 5b 
+```{r, eval=FALSE}
+# Compute fragment size distribution (takes time)
+# path.prefix <- "/data/sc-10x/data-runs/181015-perslab-ap_atac/"
+# path.name <- c("181228_AP-atac-gradient_10V", "181228_AP-atac-gradient_20W",
+#                 "181228_AP-atac-gradient_31S", "190222_5S",
+#                 "190222_7W", "190222_11V", "190222_23V", "190222_25V",
+#                "190222_30S", "190222_32V", "190222_33W", "190222_34W",
+#                "190222_37W", "190222_39S", "190222_40S")
+# path.suffix <- "/outs/possorted_bam.bam"
+# frag.files <- paste0(path.prefix, path.name, path.suffix)
+# 
+# size.range <- 1:1010
+#  
+# frag.size.list <- list()
+# for (i in 1:length(frag.files)){
+#   frag.size.i <- fragSizeDist(frag.files[i], path.name[i])
+#   frag.size.i <- data.frame(frag.size.i[[1]])
+#   colnames(frag.size.i) <- c("size", "count")
+#   frag.size.i <- frag.size.i[match(size.range, frag.size.i$size), ] 
+#   frag.size.i$size <- size.range
+#   frag.size.i$count[is.na(frag.size.i$count)] <- 0
+#   frag.size.i$size <- as.numeric(frag.size.i$size)
+#   frag.size.list[[i]] <- frag.size.i
+#  
+# }
+# 
+# frag.size <- rbindlist(frag.size.list)
+# frag.size <- aggregate(count ~ size, data = frag.size, sum)
+# frag.size$freq <- frag.size$count/sum(frag.size$count) * 10^3
+#  
+# saveRDS(frag.size, file = "/projects/mludwig/Ludwig-2021/output/scATAC_QC/fragment_size.rds")
+```
+
+```{r}
+frag.size <- readRDS("/projects/mludwig/Ludwig-2021/output/scATAC_QC/fragment_size.rds")
+
+frag.size.plot <- ggplot(frag.size, aes(x=size, y=freq)) + 
+  geom_line(size = 0.4) +
+  xlab("Fragment length (bp)") +
+  ylab(expression(bold("Normalized read density x 10"^-3))) +
+  theme_pubr(legend="right") + theme(panel.border = element_blank(), 
+                     panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black", size = 0.4),
+                     axis.title.x = element_text(size=6, face="bold"),
+                     axis.title.y = element_text(size=6, face="bold"),
+                     axis.text = element_text(size=6, face="bold"),
+                     legend.text = element_text(size=6, face="bold"),
+                     legend.title = element_text(size=6, face="bold"), 
+                     plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  scale_x_continuous(breaks=seq(0, 1000, 200), limits = c(0, 1010))
+frag.size.plot
+```
+
+# Fig. 5c
+```{r}
+umap.embed.AP <- as.data.frame(AP.peaks@reductions$umap@cell.embeddings)
+umap.embed.AP$cell.type <- AP.peaks$cell.type
+label <- data.frame(cell.type = unique(umap.embed.AP$cell.type))
+label <- umap.embed.AP %>% 
+  dplyr::group_by(cell.type) %>% 
+  dplyr::summarize(x = median(UMAP_1), y = median(UMAP_2)) 
+
+AP.umap.plot <- ggplot(data = umap.embed.AP, mapping = aes(x = UMAP_1, y = UMAP_2, 
+                                                           colour = cell.type)) +
+  geom_point(size = 1, alpha = 0.5) +
+  theme_pubr() +
+  theme(axis.line = element_line(colour = "black", size = 0.4), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(), 
+        legend.position = "none",
+        axis.title = element_text(size=6, face="bold"),
+        axis.text = element_text(size=6, face="bold")) +
+  xlab("UMAP 1") + ylab("UMAP 2") + 
+  scale_color_futurama(alpha = 0.2) +
+  geom_text_repel(data = label, aes(label = cell.type, x=x, y=y), 
+                  size=2, fontface="bold", inherit.aes = F)
+AP.umap.plot
+```
+
+# Fig. 5d
+```{r}
+pal <- readRDS("/projects/mludwig/Ludwig-2021/output/plots_general/pal_subpopulations.rds")
+pal <- pal[which(neuron.type.info$cell.type2 %in% neurons.peaks$cell.subtype2)]
+
+umap.embed.neurons <- as.data.frame(neurons.peaks@reductions$umap@cell.embeddings)
+umap.embed.neurons$cell.type2 <- neurons.peaks$cell.subtype2
+label <- umap.embed.neurons %>% 
+  dplyr::group_by(cell.type2) %>% 
+  dplyr::summarize(UMAP_1 = median(UMAP_1), UMAP_2 = median(UMAP_2)) 
+
+neurons.umap.plot <- ggplot(data = umap.embed.neurons, 
+                            mapping = aes(x = UMAP_1, y = UMAP_2, 
+                                          colour = cell.type2)) +
+  geom_point(size = 1, alpha = 0.5) +
+  theme_pubr() +
+  theme(axis.line = element_line(colour = "black", size = 0.4), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(), 
+        legend.position = "none",
+        axis.title = element_text(size=6, face="bold"),
+        axis.text = element_text(size=6, face="bold")) +
+    scale_color_manual(values = pal) +
+  xlab("UMAP 1") + ylab("UMAP 2") + 
+  geom_text_repel(data = label, aes(label = cell.type2, x=UMAP_1, y=UMAP_2), 
+                  size=2, fontface="bold", inherit.aes = F) + 
+  scale_y_continuous(breaks = c(-10, 0, 10))
+neurons.umap.plot
+```
+
+# Find cell type specific motifs across glial cells
+```{r}
+DefaultAssay(AP.peaks) <- "chromvar"
+
+AP.cell.types <- levels(AP.peaks$cell.type)
+AP.cell.types <- AP.cell.types[!(AP.cell.types == "Neurons")]
+n.test <- length(AP.cell.types) * nrow(TF.meta)
+
+AP.motifs <- foreach(i = AP.cell.types)  %dopar% {
+
+  da.motifs <- find.markers(object = AP.peaks, 
+                            features = rownames(AP.peaks),
+                            group = "cell.type", ident.1 = i)
+  
+  da.motifs$TF <- TF.meta$TF[match(rownames(da.motifs), TF.meta$motif)]
+  da.motifs$p.adj <- p.adjust(da.motifs$p, method = "bonferroni", 
+                                 n = n.test)
+
+  da.motifs <- da.motifs[which(da.motifs$average.zscore1 > 1 & 
+                                 da.motifs$p.adj < 0.05),]
+  
+  da.motifs <- da.motifs[order(-log(da.motifs$p), da.motifs$average.zscore1,
+                               decreasing = T), ]
+  da.motifs
+}
+names(AP.motifs) <- AP.cell.types
+```
+
+# Correlation between motif accessibility and gene expression in major cell types
+```{r}
+AP.gene.expr.rank <- compute.gene.expr.rank(
+  path = "/projects/mludwig/genetics/CELLECT/CELLEX", 
+  name = "AP_RNA_specificity_dendrogram1", TFs = TF.meta$Tf)
+
+colnames(AP.gene.expr.rank) <- gsub("\\.", " ", colnames(AP.gene.expr.rank))
+colnames(AP.gene.expr.rank) <- gsub("Tanycyte like cells", "Tanycyte-like cells",
+                                    colnames(AP.gene.expr.rank))
+AP.motif.access <- compute.average.access(AP.peaks, ident = "cell.type", 
+                                          TFs = TF.meta$Tf)
+AP.motif.access <- AP.motif.access[, !(colnames(AP.motif.access) == "Neurons")]
+
+AP.modulaty.cor <- compute.modality.cor(gene.expr.rank = AP.gene.expr.rank,
+                                        average.access = AP.motif.access)
+
+median(AP.modulaty.cor$Rho)
+
+AP.modulaty.cor$p.transform <- -2*log(AP.modulaty.cor$p.value)
+meta.p.value <- pchisq(sum(AP.modulaty.cor$p.transform), df=(2 * nrow(AP.modulaty.cor)), lower.tail = F)
+
+meta.p.value
+```
+
+# Fig. 5e
+```{r}
+# Load CELLEX data
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram1.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex) <- gsub("\\.", " ", colnames(cellex))
+colnames(cellex) <- gsub("Tanycyte like cells", "Tanycyte-like cells", colnames(cellex))
+rownames(cellex) <- gsub("Trp53", "Tp53", rownames(cellex))
+rownames(cellex) <- gsub("Trp63", "Tp63", rownames(cellex))
+rownames(cellex) <- gsub("Trp73", "Tp73", rownames(cellex))
+
+# Find top 1 marker TF that is also present in CELLEX data
+marker.TFs <- c()
+for (i in names(AP.motifs)){
+  motifs <- TF.meta$Tf[match(AP.motifs[[i]]$TF, TF.meta$TF)]
+  idx <- which(motifs %in% rownames(cellex))[1]
+  top.motif <- motifs[idx]
+  marker.TFs <- c(marker.TFs, top.motif)
+}
+marker.TFs <- as.character(na.omit(unique(marker.TFs)))
+marker.motifs <- TF.meta$motif[match(marker.TFs, TF.meta$Tf)]
+
+# Get CELLEX values for marker TFs
+marker.TFs.cellex <- cellex[marker.TFs,]
+marker.TFs.cellex$TF <- rownames(marker.TFs.cellex)
+marker.TFs.cellex <- melt(marker.TFs.cellex, id.vars = "TF")
+colnames(marker.TFs.cellex) <- c("TF", "cell.type", "cellex.score")
+
+# Get P-values of enrichment for marker TFs
+marker.TFs.pvalue <- data.frame(matrix(1, nrow = length(marker.TFs), 
+                                       ncol = length(AP.motifs)))
+colnames(marker.TFs.pvalue) <- names(AP.motifs)
+rownames(marker.TFs.pvalue) <- marker.TFs
+n.test <- length(names(AP.motifs)) * nrow(TF.meta)
+
+for (i in colnames(marker.TFs.pvalue)) {
+  da.motifs <- AP.motifs[[i]][na.omit(match(toupper(rownames(marker.TFs.pvalue)),
+                                           AP.motifs[[i]]$TF)),]
+  da.motifs$Tf <- TF.meta$Tf[match(rownames(da.motifs), TF.meta$motif)]
+  marker.TFs.pvalue[match(da.motifs$Tf, rownames(marker.TFs.pvalue)), i] <- da.motifs$p.adj
+}
+marker.TFs.pvalue$TF <- rownames(marker.TFs.pvalue)
+marker.TFs.pvalue <- melt(marker.TFs.pvalue, id.vars = "TF")
+colnames(marker.TFs.pvalue) <- c("TF", "cell.type", "p.value")
+
+# Compute dendrogram
+marker.TFs.access <- compute.average.access(AP.peaks, ident = "cell.type", 
+                                               TFs = TF.meta$Tf)[marker.TFs, ]
+marker.TFs.access <- marker.TFs.access[, !(colnames(marker.TFs.access) == "Neurons")]
+
+cell.type.dendro <- as.dendrogram(hclust(dist(t(marker.TFs.access))))
+cell.type.dendro <- dendro_data(cell.type.dendro)
+
+TF.dendro <-as.dendrogram(hclust(dist(marker.TFs.access)))
+TF.dendro <- dendro_data(TF.dendro)
+
+# Prepare data for plotting
+TF.position <- data.frame(TF = toupper(TF.dendro$labels$label)) %>%
+  mutate(y.center = 1:n(), height=1)
+  
+cell.type.position <- with(cell.type.dendro$labels, 
+                         data.frame(x.center = x, cell.type = as.character(label), 
+                                    width = 1))
+
+x.axis.limits <- with(cell.type.position, 
+    c(min(x.center - 0.5 * width), max(x.center + 0.5 * width))) + 
+    0.1 * c(-1, 1) 
+
+marker.TFs.plot = merge(marker.TFs.cellex, marker.TFs.pvalue, 
+                        by.x=c("TF", "cell.type"), by.y=c("TF", "cell.type"))
+
+marker.TFs.plot$size <- if_else(marker.TFs.plot$p.value < 0.05, true = 2, 
+                                false = 1)
+marker.TFs.plot$TF <- factor(toupper(marker.TFs.plot$TF),
+                                    levels = toupper(TF.dendro$labels$label))
+
+marker.TFs.plot$cell.type <- factor(marker.TFs.plot$cell.type,
+                                    levels = levels(AP.peaks$cell.type))
+
+marker.TFs.plot <- marker.TFs.plot %>% left_join(TF.position) %>% left_join(cell.type.position)
+
+# Plot TF heatmap
+heatmap.plot <- ggplot(marker.TFs.plot, aes(x = x.center, y = y.center, height = height, 
+                                    width = width)) +
+  geom_tile(size = 2, color = "white", fill = "grey99") +
+  geom_point(aes(size = size, color = cellex.score)) + 
+  scale_colour_continuous(low = "#94C8D6", high = "#F2300F",
+                          breaks = c(seq(0, 1, 0.25)), limits = c(0,1)) +  
+  scale_size(breaks = c(1,2), labels = c("NS", "<0.05"), range = c(0,2)) +
+  scale_x_continuous(breaks = cell.type.position$x.center, 
+                     labels = cell.type.position$cell.type,
+                     limits = x.axis.limits, 
+                     expand = c(0, 0)) + 
+  scale_y_continuous(breaks = TF.position$y.center, 
+                     labels = TF.position$TF,
+                     expand = c(0, 0)) + 
+  theme_pubr(legend = "top") + 
+  xlab(NULL) + ylab(NULL) +
+  guides(size = guide_legend(title = expression(paste(bolditalic("P"), bold("-value"))), 
+                             order = 1),
+         col = guide_legend(title = expression(bolditalic(paste("ES"[mu]))))) +
+  theme(axis.text.x = element_text(size = 6, face="bold", 
+                                   hjust = 1, angle = 45), 
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_text(size=6, face="bold"),
+        legend.position = 'top', legend.box = 'vertical', 
+        legend.spacing.y = unit(-0.4, "cm"),
+        legend.spacing.x = unit(-0.1, "cm"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(-0.5, 0, 0.2, 0), "cm"), 
+        panel.grid.minor = element_blank())
+
+# Plot dendrogram 
+dendrogram.plot <- ggplot(segment(cell.type.dendro)) + 
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend), size = 0.2) + 
+    scale_x_continuous(breaks = cell.type.position$x.center,
+                       labels = rep("", nrow(cell.type.position)),
+                       limits = x.axis.limits) + 
+    xlab(NULL) + ylab(NULL) +
+    theme_pubr() + 
+    theme(axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(), 
+          axis.line=element_blank(),
+          plot.margin = unit(c(0, 0, -0.1, 0), "cm"))
+
+# Plot number of cells
+n.cells <- data.frame(cell.type = levels(AP.peaks$cell.type), 
+                      n.cells = data.frame(table(AP.peaks$cell.type))$Freq)
+n.cells <- n.cells[!(n.cells$cell.type == "Neurons"),]
+order <- marker.TFs.plot$x.center[1:length(unique(marker.TFs.plot$cell.type))]
+levels <- n.cells$cell.type[match(marker.TFs.plot$cell.type, n.cells$cell.type)]
+levels <- levels[order(order)]
+n.cells$cell.type <- factor(n.cells$cell.type, levels = levels)
+
+n.cells.plot <- ggplot(n.cells, aes(x = cell.type, y = n.cells)) + 
+  geom_bar(stat = "identity", color = "black", fill = "darkgrey",
+           width = 0.5, position = position_dodge(0.1), size = 0.2) +
+  xlab("") + ylab(expression(paste(bolditalic(n)~bold(cells)))) +
+  theme_pubr() + 
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black"),
+                     axis.text.x = element_blank(),
+                     axis.text.y = element_text(size=6, face="bold"),
+                     axis.title.y = element_text(size=6, face="bold"),
+                     plot.margin = unit(c(-0.5, 0, 0, 0), "cm")) +
+  scale_y_continuous(breaks = seq(0, max(n.cells$n.cells), 2000))
+
+plot1 <- heatmap.plot + theme(legend.position="none")
+
+plot2 <- plot_grid(n.cells.plot, heatmap.plot + theme(legend.position="none"), 
+                    align = 'v', ncol = 1, 
+                    rel_heights = c(0.15, 1), axis = "rl")
+
+plot3 <- plot_grid(dendrogram.plot + theme(plot.margin = unit(c(0, -0.8, -0.15, 0), "cm")),
+                           plot2, ncol = 1,
+                            rel_heights = c(0.25, 1.15))
+
+plot4 <- plot_grid(dendrogram.plot + 
+                           theme(plot.margin = unit(c(0, -0.15, -0.2, 0.7), "cm")),
+                           plot2 + theme(plot.margin = unit(c(0.1, 0, 0, 0), "cm")),
+                           ncol = 1,
+                              rel_heights = c(0.25, 1.15))
+
+AP.motif.plot <- plot_grid(get_legend(heatmap.plot), plot4, ncol = 1, align = "v", 
+                            axis = "vh", rel_heights = c(0.2, 1)) 
+AP.motif.plot
+
+```
+
+# Find cell population specific motifs across neurons
+```{r}
+Idents(neurons.peaks) <- "cell.subtype"
+DefaultAssay(neurons.peaks) <- "chromvar"
+n.test <- length(levels(neurons.peaks$cell.subtype)) * nrow(TF.meta)
+
+neurons.motifs <- foreach(i = levels(neurons.peaks$cell.subtype))  %dopar% {
+
+  da.motifs <- find.markers(object = neurons.peaks, 
+                            features = rownames(neurons.peaks),
+                            group = "cell.subtype", ident.1 = i)
+  
+  da.motifs$TF <- TF.meta$TF[match(rownames(da.motifs), TF.meta$motif)]
+  da.motifs$p.adj <- p.adjust(da.motifs$p, method = "bonferroni", 
+                                 n = n.test)
+
+  da.motifs <- da.motifs[which(da.motifs$average.zscore1 > 1 & 
+                                 da.motifs$p.adj < 0.05),]
+  
+  da.motifs <- da.motifs[order(-log(da.motifs$p), da.motifs$average.zscore1,
+                               decreasing = T), ]
+  da.motifs
+}
+names(neurons.motifs) <- levels(neurons.peaks$cell.subtype)
+```
+
+# Correlation between motif accessibility and gene expression in neurons
+```{r}
+neurons.gene.expr.rank <- compute.gene.expr.rank(
+  path = "/projects/mludwig/genetics/CELLECT/CELLEX/",
+  name = "AP_RNA_specificity_dendrogram2", TFs = TF.meta$Tf)
+
+neurons.motif.access <- compute.average.access(neurons.peaks, ident = "cell.subtype", 
+                                               TFs = TF.meta$Tf)
+
+neurons.modulaty.cor <- compute.modality.cor(gene.expr.rank = neurons.gene.expr.rank, 
+                                                average.access = neurons.motif.access)
+median(neurons.modulaty.cor$Rho)
+
+neurons.modulaty.cor$p.transform <- -2*log(neurons.modulaty.cor$p.value)
+meta.p.value <- pchisq(sum(neurons.modulaty.cor$p.transform), 
+                       df=(2 * nrow(neurons.modulaty.cor)), lower.tail = F)
+
+meta.p.value
+```
+
+# Fig. 5f
+```{r}
+# Load CELLEX values
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram2.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex) <- gsub("\\.", " ", colnames(cellex))
+rownames(cellex) <- gsub("Trp53", "Tp53", rownames(cellex))
+rownames(cellex) <- gsub("Trp63", "Tp63", rownames(cellex))
+rownames(cellex) <- gsub("Trp73", "Tp73", rownames(cellex))
+
+
+# Find top 1 marker TF that is also present in CELLEX data
+marker.TFs <- c()
+for (i in names(neurons.motifs)){
+  motifs <- TF.meta$Tf[match(neurons.motifs[[i]]$TF, TF.meta$TF)]
+  idx <- which(motifs %in% rownames(cellex))[1]
+  top.motif <- motifs[idx]
+  marker.TFs <- c(marker.TFs, top.motif)
+}
+marker.TFs <- as.character(na.omit(unique(marker.TFs)))
+marker.motifs <- TF.meta$motif[match(marker.TFs, TF.meta$Tf)]
+
+# Get CELLEX values for marker TFs
+marker.TFs.cellex <- cellex[marker.TFs,]
+marker.TFs.cellex$TF <- rownames(marker.TFs.cellex)
+marker.TFs.cellex <- melt(marker.TFs.cellex, id.vars = "TF")
+colnames(marker.TFs.cellex) <- c("TF", "cell.type", "cellex.score")
+
+# Get P-values of enrichment for marker TFs
+marker.TFs.pvalue <- data.frame(matrix(1, nrow = length(marker.TFs), 
+                                       ncol = length(neurons.motifs)))
+colnames(marker.TFs.pvalue) <- names(neurons.motifs)
+rownames(marker.TFs.pvalue) <- marker.TFs
+n.test <- length(names(neurons.motifs)) * nrow(TF.meta)
+
+for (i in colnames(marker.TFs.pvalue)) {
+  da.motifs <- neurons.motifs[[i]][na.omit(match(toupper(rownames(marker.TFs.pvalue)),
+                                           neurons.motifs[[i]]$TF)),]
+  da.motifs$Tf <- TF.meta$Tf[match(rownames(da.motifs), TF.meta$motif)]
+  marker.TFs.pvalue[match(da.motifs$Tf, rownames(marker.TFs.pvalue)), i] <- da.motifs$p.adj
+}
+marker.TFs.pvalue$TF <- rownames(marker.TFs.pvalue)
+marker.TFs.pvalue <- melt(marker.TFs.pvalue, id.vars = "TF")
+colnames(marker.TFs.pvalue) <- c("TF", "cell.type", "p.value")
+
+# Compute dendrogram
+marker.TFs.access <- compute.average.access(neurons.peaks, ident = "cell.subtype2", 
+                                               TFs = TF.meta$Tf)[marker.TFs,]
+cell.type.dendro <- as.dendrogram(hclust(dist(t(marker.TFs.access))))
+cell.type.dendro <- dendro_data(cell.type.dendro)
+
+TF.dendro <- as.dendrogram(hclust(dist(marker.TFs.access)))
+TF.dendro <- dendro_data(TF.dendro)
+
+# Prepare data for plotting
+TF.position <- data.frame(TF = toupper(TF.dendro$labels$label)) %>%
+  mutate(y.center = 1:n(), height=1)
+
+cell.type.position <- with(cell.type.dendro$labels, 
+                         data.frame(x.center = x, cell.type2 = as.character(label), 
+                                    width = 1))
+
+x.axis.limits <- with(cell.type.position, 
+    c(min(x.center - 0.5 * width), max(x.center + 0.5 * width))) + 
+    0.1 * c(-1, 1) 
+
+marker.TFs.plot = merge(marker.TFs.cellex, marker.TFs.pvalue, 
+                        by.x=c("TF", "cell.type"), by.y=c("TF", "cell.type"))
+
+marker.TFs.plot$size <- if_else(marker.TFs.plot$p.value < 0.05, true = 2, 
+                                false = 1)
+marker.TFs.plot$TF <- factor(toupper(marker.TFs.plot$TF),
+                                    levels = toupper(TF.dendro$labels$label))
+
+marker.TFs.plot$cell.type2 <- neuron.type.info$cell.type2[match(marker.TFs.plot$cell.type,
+                                                                neuron.type.info$cell.type)]
+marker.TFs.plot$cell.type2 <- factor(marker.TFs.plot$cell.type2, 
+                                     levels = levels(neurons.peaks$cell.subtype2))
+
+marker.TFs.plot <- marker.TFs.plot %>% left_join(TF.position) %>% left_join(cell.type.position)
+
+idx <- which(neuron.type.info$cell.type %in% marker.TFs.plot$cell.type)
+
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2[idx],
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area[idx])] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area[idx])] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area[idx])] <- 1
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("DMV", "NTS", "AP"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = cell.type.dendro$labels$label)
+
+# Plot TF heatmap
+heatmap.plot <- ggplot(marker.TFs.plot, aes(x = x.center, y = y.center, 
+                                            height = height, width = width)) +
+  geom_tile(size = 2, color = "white", fill = "grey99") +
+  geom_point(aes(size = size, color = cellex.score)) + 
+  scale_colour_continuous(low = "#94C8D6", high = "#F2300F",
+                          breaks = c(seq(0, 1, 0.25)), limits = c(0,1)) +  
+  scale_size(breaks = c(1,2), labels = c("NS", "<0.05"), range = c(0,2)) +
+  scale_x_continuous(breaks = cell.type.position$x.center, 
+                     labels = cell.type.position$cell.type2,
+                     limits = x.axis.limits, 
+                     expand = c(0, 0)) + 
+  scale_y_continuous(breaks = TF.position$y.center, 
+                       labels = TF.position$TF,
+                       expand = c(0, 0)) + 
+  guides(size = guide_legend(title = expression(paste(bolditalic("P"), bold("-value")))),
+         col = guide_legend(title = expression(paste(bold("ES"), bold(mu))))) +
+  theme_pubr(legend = "right") + 
+  xlab(NULL) + ylab(NULL) +
+  theme(axis.text.x = element_blank(), 
+        axis.text.y = element_text(size=6, face="bold"),
+        axis.ticks.x = element_blank(),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_text(size=6, face="bold"),
+        legend.position = "none",
+        axis.line = element_line(colour = "black", size = 0.4),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(-0.5, 0, 0, 0), "cm"), 
+        panel.grid.minor = element_blank())
+
+# Plot dendrogram
+dendrogram.plot <- ggplot(segment(cell.type.dendro)) + 
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend), size = 0.2) + 
+    scale_x_continuous(breaks = cell.type.position$x.center,
+                       labels = rep("", nrow(cell.type.position)),
+                       limits = x.axis.limits) + 
+    xlab(NULL) + ylab(NULL) +
+    theme_pubr() + 
+    theme(axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(), 
+          axis.line=element_blank(),
+          plot.margin = unit(c(0, 0, -0.2, 0), "cm"))
+
+# Plot DVC origin
+brain.area.plot <- ggplot(brain.area, aes(x = cell.type2, y = area)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size), color="grey60", shape=15) + 
+  scale_size(range = c(0,2)) +
+  scale_color_manual(values = "black") +
+  theme_pubr() + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6, face="bold"), 
+        legend.position = "none",
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.text = element_text(size=6, face="bold"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0), "cm"))
+
+# Plot number of neurons
+n.cells <- data.frame(cell.type2 = levels(neurons.peaks$cell.subtype2), 
+                      n.cells = data.frame(table(neurons.peaks$cell.subtype2))$Freq)
+n.cells$cell.type2 <- factor(n.cells$cell.type2, levels = cell.type.dendro$labels$label)
+
+n.cells.plot <- ggplot(n.cells, aes(x = cell.type2, y = n.cells)) + 
+  geom_bar(stat = "identity", color = "black", fill = "darkgrey",
+           width = 0.5, position = position_dodge(0.1), size = 0.2) +
+  xlab("") + ylab(expression(paste(bolditalic(n)~bold(cells)))) +
+  theme_pubr() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_line(colour = "black", size = 0.4),
+                     axis.text.x = element_blank(),
+                     axis.text.y = element_text(size=6, face="bold"),
+                     axis.title.y = element_text(size=6, face="bold"),
+                     plot.margin = unit(c(-0.5, 0, 0, 0), "cm")) +
+  scale_y_continuous(breaks = seq(0, max(n.cells$n.cells), 500))
+
+plot1 <- plot_grid(n.cells.plot, heatmap.plot, 
+                    brain.area.plot, align = 'v', ncol = 1, 
+                    rel_heights = c(0.15, 0.95, 0.4), axis = "rl")
+
+neurons.motif.plot <- plot_grid(dendrogram.plot + 
+                               theme(plot.margin = unit(c(0, -0.25, -0.1, 0.88), "cm")),
+                              plot1, ncol = 1,
+                              rel_heights = c(0.25, 1.5))
+
+```
+
+# Fig. 5g
+```{r}
+network <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_network.rds")
+
+M1.TFs <- sort(intersect(TF.meta$TF, toupper(network$M1)))
+M1.motifs <- TF.meta$motif[match(M1.TFs, TF.meta$TF)]
+
+DefaultAssay(bulk.neurons.peaks) <- "chromvar"
+Idents(bulk.neurons.peaks) <- "treatment.celltype2"
+
+# Extract accessibility of M1 module motifs
+glu4.motif.access <- data.frame(t(bulk.neurons.peaks@assays$chromvar@data[M1.motifs, which(bulk.neurons.peaks$treatment.celltype2 %in% c("S-Glu4", "W-Glu4"))]))
+rownames(glu4.motif.access) <- gsub("Subtype11", "Glu4", rownames(glu4.motif.access))
+
+# Mean and SEM
+glu4.access.mean <- aggregate(glu4.motif.access, list(gsub("[0-9]", "", rownames(glu4.motif.access))), mean,
+                     na.rm = T)
+glu4.access.mean$Group.1 <- gsub("S-Glu", "Semaglutide", glu4.access.mean$Group.1)
+glu4.access.mean$Group.1 <- gsub("W-Glu", "Weight-matched", glu4.access.mean$Group.1)
+
+glu4.access.summary <- melt(glu4.access.mean, id.vars = c("Group.1"))
+colnames(glu4.access.summary) <- c("treatment", "motif", "mean.access")
+
+glu4.access.sem <- aggregate(glu4.motif.access, list(gsub("[0-9]", "", rownames(glu4.motif.access))), std.error,
+                    na.rm = T)
+glu4.access.summary$sem <- melt(glu4.access.sem, id.vars = c("Group.1"))$value
+glu4.access.summary$TF <- TF.meta$TF[match(glu4.access.summary$motif, TF.meta$motif)]
+
+# Differential accessibility
+glu4.motif.stats <- find.markers(object = bulk.neurons.peaks, 
+                          group = "treatment.celltype2", 
+                          features = M1.motifs,
+                          ident.1 = "S-Glu4", ident.2 = "W-Glu4")
+glu4.motif.p <- signif(p.adjust(glu4.motif.stats$p, method = "bonferroni"), digits = 2)
+
+glu4.motif.p.symbol <- rep("", length(glu4.motif.p))
+glu4.motif.p.symbol[glu4.motif.p < 0.05] <- "*"
+glu4.motif.p.symbol[glu4.motif.p < 0.01] <- "**"
+glu4.motif.p.symbol[glu4.motif.p< 0.001] <- "***"
+
+
+
+# P-value position
+asterisk.position.plus <- asterisk.position.minus <- c()
+p.plus <- p.minus <- c()
+motif.plus <- motif.minus <- c()
+
+for (i in 1:length(M1.motifs)) {
+  motif <- M1.motifs[i]
+  max.access <- max(glu4.access.summary$mean.access[which(glu4.access.summary$motif == motif)])
+  if (glu4.motif.p.symbol[i] != "" & sign(max.access) == 1) {
+    asterisk.position.plus <- c(asterisk.position.plus,
+                                max(glu4.access.summary$mean.access[which(glu4.access.summary$motif == motif)] +
+                                      glu4.access.summary$sem[which(glu4.access.summary$motif == motif)]))
+    p.plus <- c(p.plus, glu4.motif.p.symbol[i])
+    motif.plus <- c(motif.plus, motif)
+  }
+  else if(glu4.motif.p.symbol[i] != "") {
+       asterisk.position.minus <- c(asterisk.position.minus,
+                                    min(glu4.access.summary$mean.access[which(glu4.access.summary$motif == motif)] -
+                                      glu4.access.summary$sem[which(glu4.access.summary$motif == motif)]))
+    p.minus <- c(p.minus, glu4.motif.p.symbol[i])
+    motif.minus <- c(motif.minus, motif)
+
+  }
+}
+asterisk.position.plus[1] <- max(glu4.motif.access$MA0764.2)
+asterisk.position.minus[2] <- min(glu4.motif.access$MA0495.3)
+asterisk.position.minus[3] <- min(glu4.motif.access$MA1583.1)
+
+xmin.plus <- which(M1.motifs %in% motif.plus) - 0.125
+xmax.plus <- which(M1.motifs %in% motif.plus) + 0.125
+
+xmin.minus <- which(M1.motifs %in% motif.minus)  - 0.125
+xmax.minus <- which(M1.motifs %in% motif.minus)  + 0.125
+
+# All values
+glu4.motif.access.long <- glu4.motif.access
+glu4.motif.access.long$treatment <- rownames(glu4.motif.access.long)
+glu4.motif.access.long$treatment <- gsub(".*W-Glu4", "Weight-matched", glu4.motif.access.long$treatment)
+glu4.motif.access.long$treatment <- gsub(".*S-Glu4", "Semaglutide", glu4.motif.access.long$treatment)
+glu4.motif.access.long <- melt(glu4.motif.access.long, id.vars = "treatment")
+colnames(glu4.motif.access.long) <- c("treatment", "motif", "access")
+glu4.motif.access.long$TF <- TF.meta$TF[match(glu4.motif.access.long$motif, TF.meta$motif)]
+
+pal <- c("#C27D38", "#BFBFBA")
+glu4.M1.motif.plot <- ggplot(glu4.access.summary, aes(x = TF, y = mean.access,
+                                                       fill = treatment)) +
+  geom_bar(stat = "identity", position="dodge", color = "black", width = 0.7, size = 0.3) +
+    geom_point(data = glu4.motif.access.long, aes(x = TF, y = access, fill = treatment), size = 0.05, color = "black", position = position_jitterdodge(jitter.width = 0)) +
+  geom_errorbar(data = glu4.access.summary, aes(ymin = mean.access, ymax = mean.access + (sem*sign(mean.access))), 
+                width = 0.5,
+                position=position_dodge(0.7), size = 0.3) +
+  xlab("") + ylab("Scaled accessibility") +
+  theme_pubr() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.text.x = element_text(size=6, face="bold.italic", angle=45, hjust=1),
+        axis.text.y = element_text(size=6, face="bold"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.key.height = unit(0.1, "cm"),
+        legend.key.width = unit(0.2, "cm"),
+        legend.margin=margin(0, 0, 0, 0),
+        legend.box.margin=margin(0, 0, 0, 0),
+        plot.margin=unit(c(0, 0, 0, 0), "cm")) +
+    scale_y_continuous(breaks=seq(-10, 50, 10), limits = c(-17, 52)) +
+  scale_fill_manual(values = pal, labels = c("Semaglutide", "Weight-matched")) +
+    geom_signif(y_position=c(1.5+asterisk.position.plus), xmin = xmin.plus, 
+              xmax=xmax.plus, tip_length = 0.01, 
+              fontface = "bold", annotation = p.plus,
+              size = 0.2, textsize = 2) +
+      geom_signif(y_position=c(asterisk.position.minus-1.5), xmin = xmin.minus, 
+              xmax=xmax.minus, tip_length = -0.01, 
+              fontface = "bold", annotation = p.minus,
+              size = 0.2, textsize = 2, vjust = 2.5)
+
+glu4.M1.motif.plot
+```
+
+# Combine all plots
+```{r}
+plot1 <- plot_grid(frag.size.plot, AP.umap.plot, neurons.umap.plot,
+                   ncol = 3, align = "h",
+                   rel_widths = c(0.8,1,1)) 
+
+plot2 <- plot_grid(get_legend(glu4.M1.motif.plot), 
+                   glu4.M1.motif.plot + theme(legend.position = "none"),
+                   ncol = 1, align = "lr",
+                   rel_heights = c(0.08, 1))
+
+plot3 <- plot_grid(AP.motif.plot + theme(plot.margin = unit(c(0, 0.5, 0.3, 0.5), "cm")),
+                   neurons.motif.plot + theme(plot.margin = unit(c(0, 0.28, 0.4, 0), "cm")), 
+                   plot2 + theme(plot.margin = unit(c(0.5, 0, 0, 0.22), "cm")), 
+                    ncol = 3, align = "h", axis = "t",
+                   rel_widths = c(0.8, 1,1)) 
+
+
+fig5 <- plot_grid(plot1 + theme(plot.margin = unit(c(0, 0, -0.1, 0), "cm")), 
+                  plot3 + theme(plot.margin = unit(c(-0.1, 0, 0, 0), "cm")), 
+                  ncol = 1, align = "v",
+                   rel_heights = c(0.8,1)) 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/figure5.png", fig5, height = 140, width = 183,
+       units = "mm")
+```
+
+
+# Supplementary Data 5
+```{r}
+motif.list <- list()
+for (i in 1:length(AP.motifs)) {
+  
+  data <- data.frame(motif = rownames(AP.motifs[[i]]),
+                     TF = AP.motifs[[i]]$TF,
+                     zscore = signif(AP.motifs[[i]]$average.zscore1, digits = 3),
+                     padj = signif(AP.motifs[[i]]$p.adj, digits = 3))
+    motif.list <- list.append(motif.list, data)
+}
+
+neurons.motifs2 <- neurons.motifs
+names(neurons.motifs2) <- neuron.type.info$cell.type2[match(names(neurons.motifs),
+                                                            neuron.type.info$cell.type)]
+
+for (i in levels(neurons.peaks$cell.subtype2)) {
+  
+    data <- data.frame(motif = rownames(neurons.motifs2[[i]]),
+                     TF = neurons.motifs2[[i]]$TF,
+                     zscore = signif(neurons.motifs2[[i]]$average.zscore1, digits = 3),
+                     padj = signif(neurons.motifs2[[i]]$p.adj, digits = 3))
+
+  motif.list <- list.append(motif.list, data)
+    
+}
+names(motif.list) <- c(names(AP.motifs), levels(neurons.peaks$cell.subtype2))
+names(motif.list) <- gsub(" ", "_", names(motif.list))
+
+write.xlsx(motif.list, 
+           file = "/projects/mludwig/Ludwig-2021/output/tables/Supplementary_Data5.xlsx",
+           rowNames = F)
+```
+
+# Source Data Fig. 5
+```{r}
+fig5g.source <- glu4.motif.access
+colnames(fig5g.source) <- TF.meta$TF[match(colnames(fig5g.source), TF.meta$motif)]
+fig5g.source$treatment <- rownames(fig5g.source)
+fig5g.source$treatment <- gsub(".*W-Glu4", "WM", fig5g.source$treatment)
+fig5g.source$treatment <- gsub(".*S-Glu4", "semaglutide", fig5g.source$treatment)
+fig5g.source$animal <- as.numeric(gsub("W-Glu4|S-Glu4", "", rownames(fig5g.source)))
+fig5g.source <- fig5g.source[, c(17:18, 1:16)]
+fig5g.source <- fig5g.source[order(fig5g.source$treatment),]
+source.data5 <- list(fig5g.source)
+names(source.data5) <- c("5g")
+
+write.xlsx(source.data5, file = "/projects/mludwig/Ludwig-2021/output/tables/Source_Data_Fig5.xlsx",
+           rowNames = F)
+```

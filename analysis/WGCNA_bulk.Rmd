@@ -1,0 +1,160 @@
+---
+title: "WGCNA_bulk"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, message = FALSE}
+library(readxl)
+library(gmodels) 
+library(preprocessCore)
+library(WGCNA)
+library(flashClust) 
+library(dplyr) 
+library(Matrix)
+library(ggplot2)
+library(tidyr)
+library(reshape2) 
+library(DESeq2)
+allowWGCNAThreads(20)
+```
+
+# Load data
+```{r}
+# Load bulk data 
+path <- "/projects/mludwig/Ludwig-2021/data/bulk/GUS2016-142-NN_Tables.xlsx"
+sheetnames <- excel_sheets(path)
+sheets <- lapply(excel_sheets(path), read_excel, path = path)
+names(sheets) <- sheetnames
+counts <- sheets[[2]]
+
+# Extract AP from data matrix
+idx.dup <- which(duplicated(counts$`Gene name`))
+AP.bulk <- counts[-idx.dup, grep("AP", colnames(counts))]
+AP.bulk <- as.matrix(AP.bulk)
+rownames(AP.bulk) <- counts$`Gene name`[-idx.dup]
+
+# Vst normalization
+condition <- vector(length = ncol(AP.bulk))
+condition[grep("Semaglutide", colnames(AP.bulk))] <- "Semaglutide"
+condition[grep("Liraglutide", colnames(AP.bulk))] <- "Liraglutide"
+condition[grep("WM", colnames(AP.bulk))] <- "WM"
+condition[grep("Vehicle", colnames(AP.bulk))] <- "Vehicle"
+condition <- factor(condition)
+AP.bulk <- DESeqDataSetFromMatrix(AP.bulk, colData = DataFrame(condition), design = ~condition)
+AP.bulk <- vst(AP.bulk, blind = F)
+AP.bulk <- assay(AP.bulk)
+
+# Remove genes with variance of zero
+idx.remove <- which(apply(AP.bulk, 1, var) == 0)
+AP.bulk <- AP.bulk[-c(idx.remove), ]
+AP.bulk <- t(AP.bulk)
+
+expr.mat <- AP.bulk
+```
+
+# Choose soft thresholding power
+```{r, include=FALSE}
+# Compute scale-free topology fit for a set of soft-thresholding powers
+powers <- c(c(1:10), seq(from = 12, to=20, by=2))
+sft <- pickSoftThreshold(expr.mat, powerVector = powers, verbose = 5, 
+                        networkType = "signed", corFnc = "bicor")
+
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab = "Soft Threshold (power)",
+     ylab="Scale Free Topology Model Fit,signed R^2", type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex = 0.9, col = "red");
+abline(h = 0.90, col = "red")
+```
+
+# Construct network
+```{r}
+soft.power <- 5 
+
+# Compute adjacency matrix 
+adjacency <- adjacency(expr.mat, power = soft.power, corFnc = "bicor", type = "signed")
+
+# Turn adjacency matrix into topological overlap matrix
+TOM <- TOMsimilarity(adjacency, TOMType = "signed")
+diss.TOM <- 1-TOM
+
+# Cluster gene based on dissimilarity
+gene.tree <- hclust(as.dist(diss.TOM), method = "average");
+
+# Plot the resulting clustering tree (dendrogram)
+plot(gene.tree, xlab = "", sub = "", main = "Gene clustering on TOM-based dissimilarity",
+     labels = F, hang = 0.04)
+```
+
+```{r}
+# Identify modules using dynamic tree cut
+min.module.size <- 30
+dynamic.mods <- cutreeDynamic(dendro = gene.tree, distM = diss.TOM,
+                            deepSplit = 3, pamRespectsDendro = F,
+                            minClusterSize = min.module.size, pamStage = F)
+
+# Plot dendrogram
+dynamic.colors <- labels2colors(dynamic.mods)
+plotDendroAndColors(gene.tree, dynamic.colors, "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "Gene dendrogram and module colors")
+```
+
+```{r}
+# Calculate eigengenes
+ME.list <- moduleEigengenes(expr.mat, colors = dynamic.colors)
+MEs <- ME.list$eigengenes
+ME.diss <- 1-cor(MEs)
+ME.tree <- hclust(as.dist(ME.diss), method = "average");
+
+# Plot module eigengenes
+plot(ME.tree, main = "Clustering of module eigengenes", xlab = "", sub = "")
+ME.diss.thres <- 0.25
+abline(h = ME.diss.thres, col = "red")
+```
+
+```{r}
+# Merge similar modules
+merge <- mergeCloseModules(expr.mat, dynamic.colors, cutHeight = ME.diss.thres, 
+                          verbose = 3)
+colors <- merge$colors
+
+MEs <- merge$newMEs
+rownames(MEs) <- rownames(expr.mat) 
+
+plotDendroAndColors(gene.tree, cbind(dynamic.colors, colors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = F, hang = 0.03,
+                    addGuide = T, guideHang = 0.05)
+```
+
+```{r}
+# Build network object 
+gene.assignment <- data.frame(module = paste0("M", match(paste0("ME", colors), colnames(MEs))))
+rownames(gene.assignment) <- colnames(expr.mat) # assign gene names as row names
+gene.assignment$module <- factor(gene.assignment$module, levels = paste0("M", seq(1:ncol(MEs))))
+
+network = list() 
+for (i in levels(gene.assignment$module)){
+  
+  genes <- which(gene.assignment == i)
+  network[[i]] <- rownames(gene.assignment)[genes]
+}
+
+colnames(MEs) <- names(network)
+```
+
+```{r}
+saveRDS(expr.mat, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_exprmat.rds")
+saveRDS(network, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_network.rds")
+saveRDS(MEs, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_MEs.rds")
+saveRDS(gene.assignment, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_gene_assignment.rds")
+saveRDS(colors, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_colors.rds")
+```
+

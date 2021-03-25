@@ -1,0 +1,160 @@
+---
+title: "extended_figure3"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(dendextend)
+library(wesanderson)
+library(ggdendro)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+```
+
+# Load data
+```{r}
+# snRNA-seq
+neurons <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/neurons_Seurat_obj.rds")
+neuron.type.info <- readRDS("/projects/mludwig/Ludwig-2021/output/AUCell/neuron_type_info.rds")
+neurons$cell.subtype2 <- neuron.type.info$cell.type2[match(neurons$cell.subtype,
+                                                           neuron.type.info$cell.type)]
+neurons$cell.subtype2 <- factor(neurons$cell.subtype2, 
+                                      levels = neuron.type.info$cell.type2)
+
+# CELLEX values
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram2.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+colnames(cellex) <- neuron.type.info$cell.type2[match(colnames(cellex),
+                                                           neuron.type.info$cell.type)]
+```
+
+# Extended data fig. 3
+```{r}
+# Compute dendrogram
+cell.type.dendro <- as.dendrogram(hclust(dist(t(cellex))))
+
+cell.type.dendro <- dendro_data(cell.type.dendro)
+
+
+  
+# Prepare data for plotting
+cell.type.position <- with(cell.type.dendro$labels, 
+                         data.frame(x.center = x, cell.type2 = as.character(label), 
+                                    width = 1))
+x.axis.limits <- with(cell.type.position, 
+    c(min(x.center - 0.5 * width), max(x.center + 0.5 * width))) + 
+    0.1 * c(-1, 1) 
+
+# Marker genes
+genes <- c("Ugt8a", "Layn", "P2rx2", "Lhfpl2", "Ntng2",
+           "Pmfbp1", "Syt10", "Sertm1","Casr", "Pirt",
+           "Gcg", "Calb1", "Cpne5", "Grp", "Grik1",
+           "Gpc3", "Cartpt", "Col19a1", "Loxl2", "Kit",
+           "Nos1", "Ankfn1", "Glra2", "Gata3", "Cbln4")
+genes <- rev(genes)
+
+gene.position <- data.frame(gene = genes) %>%
+    mutate(y.center = (1:n()), 
+           height = 1)
+
+expression <- cellex[genes,]
+expression$gene <- rownames(expression)
+expression <- melt(expression, id.vars = "gene")
+colnames(expression) <- c("gene", "cell.type2", "cellex.score")
+expression$cell.type2 <- factor(expression$cell.type2, levels = levels(neurons$cell.subtype2))
+expression$gene <- factor(expression$gene, levels = rev(genes))
+
+expression <- expression %>% left_join(gene.position) %>% left_join(cell.type.position)
+
+brain.area <- data.frame(cell.type2 = neuron.type.info$cell.type2,
+                         AP = NA, NTS = NA, DMV = NA)
+brain.area$AP[grep("AP", neuron.type.info$area)] <- 1
+brain.area$NTS[grep("NTS", neuron.type.info$area)] <- 1
+brain.area$DMV[grep("DMV", neuron.type.info$area)] <- 1
+
+brain.area <- melt(brain.area, id.vars = "cell.type2")
+colnames(brain.area) <- c("cell.type2", "area", "size")
+brain.area$area <- factor(brain.area$area, levels = c("DMV", "NTS", "AP"))
+brain.area$cell.type2 <- factor(brain.area$cell.type2,
+                                levels = cell.type.dendro$labels$labe)
+  
+# Plot expression specificities
+pal <- wes_palette("Rushmore1", 5, type = "discrete")
+heatmap.plot <- ggplot(expression, aes(x = x.center, y = y.center, height = height,
+                                       width = width)) +
+    geom_tile(size = 2, color = "white", fill = "grey99") +
+    geom_point(aes(color = cellex.score), size = 2.5) +
+    scale_color_continuous(low = pal[[4]], high = pal[[1]],
+                          breaks = c(seq(0, 1, 0.25)), limits = c(0,1)) +
+    guides(col = guide_legend(title = expression(bolditalic(paste("ES"[mu]))))) +
+   scale_x_continuous(breaks = cell.type.position$x.center, 
+                     labels = cell.type.position$cell.type2,
+                     limits = x.axis.limits, 
+                     expand = c(0, 0)) + 
+   scale_y_continuous(breaks = gene.position$y.center, 
+                       labels = gene.position$gene,
+                       expand = c(0, 0)) + 
+  theme_pubr(legend = "right") + 
+  xlab(NULL) + ylab(NULL) +
+  theme(axis.text.y = element_text(size=6, face="bold.italic"),
+        axis.text.x = element_blank(),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_text(size=6, face="bold"),
+        legend.key.width = unit(-0.05, "cm"),
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.ticks.x = element_blank(),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0), "cm"), 
+        panel.grid.minor = element_blank())
+
+# Plot dendrogram
+dendrogram.plot <- ggplot(segment(cell.type.dendro)) + 
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend), size = 0.2) + 
+    scale_x_continuous(breaks = cell.type.position$x.center,
+                       labels = rep("", nrow(cell.type.position)),
+                       limits = x.axis.limits, 
+                       expand = c(0,0)) + 
+    xlab(NULL) + ylab(NULL) +
+    theme_pubr() + 
+    theme(axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(), 
+          axis.line=element_blank(),
+          plot.margin = unit(c(0, 0, 0, 0), "cm"))
+
+# Plot DVC origin
+brain.area.plot <- ggplot(brain.area, aes(x = cell.type2, y = area)) +
+  geom_tile(size = 1, color = "white", fill="grey99") +
+  geom_point(aes(size = size), color="grey60", shape=15) + 
+  scale_size(range = c(0,2)) +
+  scale_color_manual(values = "black") +
+  theme_pubr() + xlab(NULL) + ylab(NULL) + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6, face="bold"), 
+        legend.position = "none",
+        axis.line = element_line(colour = "black", size = 0.4),
+        axis.text = element_text(size=6, face="bold"),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0), "cm"))
+```
+
+```{r}
+plot1 <- plot_grid(heatmap.plot, brain.area.plot, align = 'v', 
+                   ncol = 1, rel_heights = c(1, 0.25), axis = "rl")
+
+efig3 <- plot_grid(dendrogram.plot + 
+                               theme(plot.margin = unit(c(0, 1.6, -0.6, 0.85), "cm")),
+                             plot1, ncol = 1,
+                              rel_heights = c(0.1, 1.25))
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/efigure3.png", efig3, height = 85, width = 183,
+       units = "mm")
+```
+

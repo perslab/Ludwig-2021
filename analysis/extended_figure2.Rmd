@@ -1,0 +1,93 @@
+---
+title: "extended_figure2"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(wesanderson)
+library(dendextend)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+```
+
+# Load data
+```{r}
+# snRNA-seq
+AP <- readRDS("/projects/mludwig/Ludwig-2021/output/Seurat_objects/AP_peaks_Seurat_obj.rds")
+
+
+# CELLEX values
+cellex <- read.table(gzfile(paste0("/projects/mludwig/genetics/CELLECT/data/ESmu/",
+                                   "AP_RNA_specificity_dendrogram1.esmu.csv.gz")), 
+                     header = T, sep = ",", row.names = 1)
+
+colnames(cellex) <- gsub("Tanycyte.like.cells", "Tanycyte-like cells", colnames(cellex))
+colnames(cellex) <- gsub("\\.", " ", colnames(cellex))
+```
+
+# Extended data fig. 2
+```{r}
+genes <- c("Wt1", "Wif1", "Slc22a3", "Cdon")
+
+# Prepare data for plotting
+expression <- cellex[genes,]
+expression$gene <- rownames(expression)
+expression <- melt(expression, id.vars = "gene")
+colnames(expression) <- c("gene", "cell.type2", "cellex.score")
+expression$cell.type <- factor(expression$cell.type, levels = levels(AP$cell.type))
+expression$gene <- factor(expression$gene, levels = rev(genes))
+
+# Plot
+pal <- wes_palette("Rushmore1", 5, type = "discrete")
+heatmap.plot <- ggplot(expression, aes(x = cell.type, y = gene)) +
+    geom_tile(size = 2, color = "white", fill = "grey99") +
+    geom_point(aes(color = cellex.score), size = 2.5) +
+    scale_color_continuous(low = pal[[4]], high = pal[[1]],
+                          breaks = c(seq(0, 1, 0.5)), limits = c(0,1)) +
+    guides(col = guide_legend(title = expression(bolditalic(paste("ES"[mu]))))) +
+  theme_pubr(legend = "top") + 
+  xlab(NULL) + ylab(NULL) +
+  theme(axis.text.y = element_text(size=6, face="bold.italic"),
+        axis.text.x = element_text(size=6, face="bold", hjust = 1, angle = 45),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_text(size=6, face="bold"),
+        legend.spacing.x = unit(-0.13, "cm"), 
+        axis.line = element_line(colour = "black", size = 0.4),
+        # margin: top, right, bottom, and left
+        plot.margin = unit(c(0, 0, 0, 0), "cm"), 
+        panel.grid.minor = element_blank())
+
+heatmap.plot
+```
+
+```{r}
+blank.plot <- ggplot() + geom_blank(aes(1,1)) + 
+  cowplot::theme_nothing()
+
+
+plot1 <- plot_grid(blank.plot, get_legend(heatmap.plot), 
+                   blank.plot,
+                   ncol = 3, align = "v", axis = "tb",
+                   rel_widths = c(0.1, 1, 0.1))
+
+plot2 <- plot_grid(plot1, 
+                   heatmap.plot + theme(legend.position = "none"),
+                   ncol = 1, align = "v",
+                   rel_heights = c(0.2, 1),
+                   axis = "rl")
+efig2 <- plot_grid(plot2, blank.plot,  
+                  ncol = 2, align = "h",
+                  rel_widths = c(1, 4), axis = "vh") 
+
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/efigure2.png", efig2, height = 32, width = 183,
+       units = "mm")
+```

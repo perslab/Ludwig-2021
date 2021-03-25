@@ -1,0 +1,762 @@
+---
+title: "extended_figure10"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(reshape2)
+library(cowplot)
+library(pzfx)
+library(wesanderson)
+library(plotrix)
+library(openxlsx)
+library(lme4)
+library(emmeans)
+library(rlist)
+```
+
+# Extended data fig. 10b
+```{r}
+# Load data
+chow.FI <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_CalcrNTS_chow_FI.xlsx",
+                     rowNames=T)
+
+# Mean and SEM
+chow.FI.mean <- aggregate(t(chow.FI), list(gsub("[0-9]", "", colnames(chow.FI))), mean,
+                     na.rm = T)
+chow.FI.sem <- aggregate(t(chow.FI), list(gsub("[0-9]", "", colnames(chow.FI))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+chow.FI.mean <- melt(chow.FI.mean, id.vars = c("Group.1"))
+chow.FI.sem <- melt(chow.FI.sem, id.vars = c("Group.1"))
+
+chow.FI.summary <- cbind(chow.FI.mean, chow.FI.sem$value)
+colnames(chow.FI.summary) <- c("treatment", "day", "FI", "SEM")
+chow.FI.summary$treatment <- factor(chow.FI.summary$treatment, 
+                                 levels = c("Control", "CalcrDq"))
+
+# Statistical testing
+chow.FI.long <- chow.FI
+chow.FI.long$day <- rownames(chow.FI.long)
+chow.FI.long <- melt(chow.FI.long, id.vars = "day")
+colnames(chow.FI.long) <- c("day", "sample", "FI")
+chow.FI.long$treatment <- gsub("[0-9]", "", chow.FI.long$sample)
+chow.FI.long$treatment <- factor(chow.FI.long$treatment, levels = c("Control", "CalcrDq"))
+chow.FI.long$day <- factor(chow.FI.long$day)
+
+# Linear mixed effects model
+chow.FI.model <- lmer(FI ~ treatment * day + (1|sample),
+            data=chow.FI.long,
+            REML=TRUE)
+# Least-squares means
+chow.FI.model <- lsmeans(chow.FI.model, pairwise ~ treatment | day, adjust = "bonferroni")
+chow.FI.model <- summary(chow.FI.model$contrasts)
+
+chow.FI.summary$p.adj <- NA
+chow.FI.summary$p.adj[which(chow.FI.summary$treatment == "CalcrDq")] <- 
+  signif(chow.FI.model$p.value[which(chow.FI.model$contrast == "Control - CalcrDq")], digits = 1)
+
+
+# P-value position
+position <- c()
+for (i in (unique(chow.FI.summary$day))) {
+  position <- c(position, max(chow.FI.summary$FI[chow.FI.summary$day == i] + 
+                                chow.FI.summary$SEM[chow.FI.summary$day == i]))
+}
+position <- data.frame(day = unique(chow.FI.summary$day), y = position)
+
+CalcrDq.signif <- chow.FI.summary[which(chow.FI.summary$treatment == "CalcrDq" & chow.FI.summary$p.adj < 0.05),]
+CalcrDq.signif$y <- position$y[which(position$day %in% CalcrDq.signif$day)]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#90CEDE", "#E64B35")
+chow.FI.plot <- ggplot(data = chow.FI.summary, aes(x = day, y = FI, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .1) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  xlab("Days") + 
+  scale_y_continuous(name = "Food intake (normalized)", limits = c(0, 1.35), 
+                     breaks = seq(0, 2, 0.5)) +
+  scale_color_manual(values = pal, 
+                     labels=c("Control",
+                              expression(paste(bolditalic("Calcr-Dq"))))) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust=1, face="bold", size=6),
+        axis.line = element_line(colour="black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),          
+        legend.spacing.x = unit(-0.005, "cm"),
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0)) +
+  guides(col = guide_legend(title = "Treatment")) +
+  geom_text(aes(2, 1.23, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_text(aes(3, 1.23, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 2, y = 1.23, xend = 2, yend = 1.15),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) +
+  geom_segment(aes(x = 3, y = 1.23, xend = 3, yend = 1.15),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) + 
+  geom_signif(y_position=c(CalcrDq.signif$y + 0.05), xmin=CalcrDq.signif$day, 
+              xmax=CalcrDq.signif$day, size = 0, textsize = 1.55, parse = T, vjust = 0.4,
+              annotation=c("'10'^-8", "'2x10'^-7"), fontface = "bold", colour = "black") 
+  
+chow.FI.plot
+```
+
+# Extended data fig. 10c
+```{r}
+# Load data
+chow.BW <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_CalcrNTS_chow_BW.xlsx",
+                     rowNames=T)
+# Mean and SEM
+chow.BW.mean <- aggregate(t(chow.BW), list(gsub("[0-9]", "", colnames(chow.BW))), mean,
+                     na.rm = T)
+chow.BW.sem <- aggregate(t(chow.BW), list(gsub("[0-9]", "", colnames(chow.BW))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+chow.BW.mean <- melt(chow.BW.mean, id.vars = c("Group.1"))
+chow.BW.sem <- melt(chow.BW.sem, id.vars = c("Group.1"))
+
+chow.BW.summary <- cbind(chow.BW.mean, chow.BW.sem$value)
+colnames(chow.BW.summary) <- c("treatment", "day", "BW", "SEM")
+chow.BW.summary$treatment <- factor(chow.BW.summary$treatment, 
+                                 levels = c("Control", "CalcrDq"))
+
+# Statistical testing
+chow.BW.long <- chow.BW
+chow.BW.long$day <- rownames(chow.BW.long)
+chow.BW.long <- melt(chow.BW.long, id.vars = "day")
+colnames(chow.BW.long) <- c("day", "sample", "BW")
+chow.BW.long$treatment <- gsub("[0-9]", "", chow.BW.long$sample)
+chow.BW.long$treatment <- factor(chow.BW.long$treatment, levels = c("Control", "CalcrDq"))
+chow.BW.long$day <- factor(chow.BW.long$day)
+
+# Linear mixed effects model
+chow.BW.model <- lmer(BW ~ treatment * day + (1|sample),
+            data=chow.BW.long,
+            REML=TRUE)
+
+# Least-squares means
+chow.BW.model <- lsmeans(chow.BW.model, pairwise ~ treatment | day, adjust = "bonferroni")
+chow.BW.model <- summary(chow.BW.model$contrasts)
+
+chow.BW.summary$p.adj <- NA
+chow.BW.summary$p.adj[which(chow.BW.summary$treatment == "CalcrDq")] <- 
+  signif(chow.BW.model$p.value[which(chow.BW.model$contrast == "Control - CalcrDq")], digits = 1)
+
+
+# P-value position
+position <- c()
+for (i in (unique(chow.BW.summary$day))) {
+  position <- c(position, max(chow.BW.summary$BW[chow.BW.summary$day == i] + 
+                                chow.BW.summary$SEM[chow.BW.summary$day == i]))
+}
+position <- data.frame(day = unique(chow.BW.summary$day), y = position)
+
+CalcrDq.signif <- chow.BW.summary[which(chow.BW.summary$treatment == "CalcrDq" & 
+                                         chow.BW.summary$p.adj < 0.05),]
+CalcrDq.signif$y <- position$y[which(position$day %in% CalcrDq.signif$day)]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#90CEDE", "#E64B35")
+chow.BW.plot <- ggplot(data = chow.BW.summary, aes(x = day, y = BW, col = treatment,
+                                                  group = treatment)) +  
+  geom_errorbar(aes(ymin = BW, ymax = BW+SEM), width = .1) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  xlab("Days") + 
+  scale_y_continuous(name = "Body weight (normalized)", limits = c(0.85, 1.1), 
+                     breaks = seq(0.85, 1.10, 0.05)) +
+  scale_color_manual(values = pal, 
+                     labels=c("Control", 
+                              expression(paste(bolditalic("Calcr-Dq"))))) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust = 1, size=6, face = "bold"),
+        axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.x = unit(-0.005, "cm"),
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0)) +
+  guides(col = guide_legend(title = "Treatment")) +
+  geom_text(aes(3, 1.065, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_text(aes(4, 1.065, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 3, y = 1.068, xend = 3, yend = 1.053),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) +
+  geom_segment(aes(x = 4, y = 1.068, xend = 4, yend = 1.053),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) +
+  geom_signif(y_position=c(CalcrDq.signif$y + 0.012), xmin=CalcrDq.signif$day, 
+              xmax=CalcrDq.signif$day, size = 0, textsize = 1.55, parse = T, vjust = 0.4,
+              annotation=c("'2x10'^-12", "'6x10'^-17", "'9x10'^-12"), fontface = "bold", colour = "black")
+
+chow.BW.plot
+```
+
+# Extended data fig. 10d
+```{r}
+HFD.FI.acute <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_CalcrNTS_HFD_acute.xlsx",
+                       rowNames = T)
+
+HFD.FI.acute.mean <- aggregate(t(HFD.FI.acute), list(gsub("[0-9]", "", colnames(HFD.FI.acute))), mean,
+                     na.rm = T)
+HFD.FI.acute.sem <- aggregate(t(HFD.FI.acute), list(gsub("[0-9]", "", colnames(HFD.FI.acute))), std.error,
+                    na.rm = T)
+
+HFD.FI.acute.mean <- melt(HFD.FI.acute.mean, id.vars = c("Group.1"))
+HFD.FI.acute.sem <- melt(HFD.FI.acute.sem, id.vars = c("Group.1"))
+
+HFD.FI.acute.summary <- cbind(HFD.FI.acute.mean, HFD.FI.acute.sem$value)
+colnames(HFD.FI.acute.summary) <- c("treatment", "hour", "FI", "SEM")
+HFD.FI.acute.summary$treatment <- factor(HFD.FI.acute.summary$treatment, 
+                                 levels = c("Saline", "CNO"))
+HFD.FI.acute.summary$hour <- as.numeric(as.character(HFD.FI.acute.summary$hour))
+
+# Statistical testing
+HFD.FI.acute.long <- HFD.FI.acute
+HFD.FI.acute.long$hour <- rownames(HFD.FI.acute.long)
+HFD.FI.acute.long <- melt(HFD.FI.acute.long, id.vars = "hour")
+colnames(HFD.FI.acute.long) <- c("hour", "sample", "FI")
+HFD.FI.acute.long$treatment <- gsub("[0-9]", "", HFD.FI.acute.long$sample)
+HFD.FI.acute.long$treatment <- factor(HFD.FI.acute.long$treatment, levels = c("Saline", "CNO"))
+HFD.FI.acute.long$hour <- factor(HFD.FI.acute.long$hour)
+
+# Linear mixed effects model
+HFD.FI.acute.model <- lmer(FI ~ treatment * hour + (1|sample),
+            data=HFD.FI.acute.long,
+            REML=TRUE)
+
+# Least-squares meeans
+HFD.FI.acute.model <- lsmeans(HFD.FI.acute.model, pairwise ~ treatment | hour, adjust = "bonferroni")
+HFD.FI.acute.model <- summary(HFD.FI.acute.model$contrasts)
+
+HFD.FI.acute.summary$p.adj <- NA
+HFD.FI.acute.summary$p.adj[which(HFD.FI.acute.summary$treatment == "CNO")] <- 
+  signif(HFD.FI.acute.model$p.value[which(HFD.FI.acute.model$contrast == "Saline - CNO")], digits = 1)
+
+# P-value position
+position <- c()
+for (i in (unique(HFD.FI.acute.summary$hour))) {
+  position <- c(position, max(HFD.FI.acute.summary$FI[HFD.FI.acute.summary$hour == i] + 
+                                HFD.FI.acute.summary$SEM[HFD.FI.acute.summary$hour == i]))
+}
+position <- data.frame(hour = unique(HFD.FI.acute.summary$hour), y = position)
+
+CNO.signif <- HFD.FI.acute.summary[which(HFD.FI.acute.summary$treatment == "CNO" & HFD.FI.acute.summary$p.adj < 0.05),]
+CNO.signif$y <- position$y[which(position$hour %in% CNO.signif$hour)]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#90CEDE", "#E64B35")
+HFD.FI.acute.plot <- ggplot(data = HFD.FI.acute.summary, aes(x = hour, y = FI, col = treatment, 
+                                                    group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .1) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  scale_y_continuous(name = "Food intake (g)", limits = c(0, 2.1), 
+                     breaks = seq(0, 2, 0.5)) +
+  scale_x_continuous(name = "Hours", limits = c(0, 4.1), breaks = seq(0, 4, 1)) +
+  scale_color_manual(values = pal, 
+                     labels=c(expression(paste(bolditalic("Calcr-Dq"), bold(" + saline"))),
+                              expression(paste(bolditalic("Calcr-Dq"), bold(" + CNO"))))) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust=1, size=6, face = "bold"),
+        axis.line = element_line(colour="black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.x = unit(-0.005, "cm"),
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0)) +
+  guides(col = guide_legend(title = "Treatment")) +
+  geom_signif(y_position=c(CNO.signif$y + 0.05), xmin=CNO.signif$hour, 
+              xmax=CNO.signif$hour, size = 0, textsize = 1.55, parse = T, vjust = 0.4,
+              annotation=c("'8x10'^-7", "'2x10'^-9"), fontface = "bold", colour = "black") 
+  
+HFD.FI.acute.plot
+```
+
+# Extended data fig. 10e
+```{r}
+# Load data
+HFD.FI <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_CalcrNTS_HFD_FI.xlsx",
+                    rowNames = T)
+
+# Mean and SEM
+HFD.FI.mean <- aggregate(t(HFD.FI), list(gsub("[0-9]", "", colnames(HFD.FI))), mean,
+                     na.rm = T)
+HFD.FI.sem <- aggregate(t(HFD.FI), list(gsub("[0-9]", "", colnames(HFD.FI))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+HFD.FI.mean <- melt(HFD.FI.mean, id.vars = c("Group.1"))
+HFD.FI.sem <- melt(HFD.FI.sem, id.vars = c("Group.1"))
+
+HFD.FI.summary <- cbind(HFD.FI.mean, HFD.FI.sem$value)
+colnames(HFD.FI.summary) <- c("treatment", "day", "FI", "SEM")
+HFD.FI.summary$treatment <- factor(HFD.FI.summary$treatment, 
+                                 levels = c("Control", "CalcrDq"))
+
+
+# Statistical testing
+HFD.FI.long <- HFD.FI
+HFD.FI.long$day <- rownames(HFD.FI.long)
+HFD.FI.long <- melt(HFD.FI.long, id.vars = "day")
+colnames(HFD.FI.long) <- c("day", "sample", "FI")
+HFD.FI.long$treatment <- gsub("[0-9]", "", HFD.FI.long$sample)
+HFD.FI.long$treatment <- factor(HFD.FI.long$treatment, levels = c("Control", "CalcrDq"))
+HFD.FI.long$day <- factor(HFD.FI.long$day)
+
+# Mixed linear effects model
+HFD.FI.model <- lmer(FI ~ treatment * day + (1|sample),
+            data=HFD.FI.long,
+            REML=TRUE)
+
+# Least-squares means
+HFD.FI.model <- lsmeans(HFD.FI.model, pairwise ~ treatment | day, adjust = "bonferroni")
+HFD.FI.model <- summary(HFD.FI.model$contrasts)
+
+HFD.FI.summary$p.adj <- NA
+HFD.FI.summary$p.adj[which(HFD.FI.summary$treatment == "CalcrDq")] <- 
+  signif(HFD.FI.model$p.value[which(HFD.FI.model$contrast == "Control - CalcrDq")], digits = 1)
+
+
+# P-value position
+position <- c()
+for (i in (unique(HFD.FI.summary$day))) {
+  position <- c(position, max(HFD.FI.summary$FI[HFD.FI.summary$day == i] + 
+                                HFD.FI.summary$SEM[HFD.FI.summary$day == i]))
+}
+position <- data.frame(day = unique(HFD.FI.summary$day), y = position)
+
+CalcrDq.signif <- HFD.FI.summary[which(HFD.FI.summary$treatment == "CalcrDq" & HFD.FI.summary$p.adj < 0.05),]
+CalcrDq.signif$y <- position$y[which(position$day %in% CalcrDq.signif$day)]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#90CEDE", "#E64B35")
+HFD.FI.plot <- ggplot(data = HFD.FI.summary, aes(x = day, y = FI, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .1) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  xlab("Days") + 
+  scale_y_continuous(name = "Food intake (normalized)", limits = c(0, 1.35), 
+                     breaks = seq(0, 2, 0.5)) +
+  scale_color_manual(values = pal, 
+                     labels=c("Control",
+                              expression(paste(bolditalic("Calcr-Dq"))))) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust=1, size=6, face="bold"),
+        axis.line = element_line(colour="black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.x = unit(-0.005, "cm"),
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0)) +
+  guides(col = guide_legend(title = "Treatment")) +
+  geom_text(aes(3, 1.23, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_text(aes(4, 1.23, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 3, y = 1.23, xend = 3, yend = 1.15),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) +
+  geom_segment(aes(x = 4, y = 1.23, xend = 4, yend = 1.15),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) + 
+  geom_signif(y_position=c(CalcrDq.signif$y + 0.05), xmin=CalcrDq.signif$day, 
+              xmax=CalcrDq.signif$day, size = 0, textsize = 1.55, parse = T, vjust = 0.4,
+              annotation=c("'2x10'^-15", "'10'^-16"), fontface = "bold", colour = "black") 
+  
+
+HFD.FI.plot
+```
+
+# Extended data fig. 10f
+```{r}
+# Load data
+HFD.BW <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_CalcrNTS_HFD_BW.xlsx",
+                    rowNames = T)
+
+# Mean and SEM
+HFD.BW.mean <- aggregate(t(HFD.BW), list(gsub("[0-9]", "", colnames(HFD.BW))), mean,
+                     na.rm = T)
+HFD.BW.sem <- aggregate(t(HFD.BW), list(gsub("[0-9]", "", colnames(HFD.BW))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+HFD.BW.mean <- melt(HFD.BW.mean, id.vars = c("Group.1"))
+HFD.BW.sem <- melt(HFD.BW.sem, id.vars = c("Group.1"))
+
+HFD.BW.summary <- cbind(HFD.BW.mean, HFD.BW.sem$value)
+colnames(HFD.BW.summary) <- c("treatment", "day", "BW", "SEM")
+HFD.BW.summary$treatment <- factor(HFD.BW.summary$treatment, 
+                                 levels = c("Control", "CalcrDq"))
+
+# Statistical testing
+HFD.BW.long <- HFD.BW
+HFD.BW.long$day <- rownames(HFD.BW.long)
+HFD.BW.long <- melt(HFD.BW.long, id.vars = "day")
+colnames(HFD.BW.long) <- c("day", "sample", "BW")
+HFD.BW.long$treatment <- gsub("[0-9]", "", HFD.BW.long$sample)
+HFD.BW.long$treatment <- factor(HFD.BW.long$treatment, levels = c("Control", "CalcrDq"))
+HFD.BW.long$day <- factor(HFD.BW.long$day)
+
+# Linear mixed effects model
+HFD.BW.model <- lmer(BW ~ treatment * day + (1|sample),
+            data=HFD.BW.long,
+            REML=TRUE)
+
+# Least-squares means
+HFD.BW.model <- lsmeans(HFD.BW.model, pairwise ~ treatment | day, adjust = "bonferroni")
+HFD.BW.model <- summary(HFD.BW.model$contrasts)
+
+HFD.BW.summary$p.adj <- NA
+HFD.BW.summary$p.adj[which(HFD.BW.summary$treatment == "CalcrDq")] <- 
+  signif(HFD.BW.model$p.value[which(HFD.BW.model$contrast == "Control - CalcrDq")], digits = 1)
+
+# Asterisk position
+position <- c()
+for (i in (unique(HFD.BW.summary$day))) {
+  position <- c(position, max(HFD.BW.summary$BW[HFD.BW.summary$day == i] + 
+                                HFD.BW.summary$SEM[HFD.BW.summary$day == i]))
+}
+position <- data.frame(day = unique(HFD.BW.summary$day), y = position)
+
+CalcrDq.signif <- HFD.BW.summary[which(HFD.BW.summary$treatment == "CalcrDq" & HFD.BW.summary$p.adj < 0.05),]
+CalcrDq.signif$y <- position$y[which(position$day %in% CalcrDq.signif$day)]
+
+# Plot
+pd <- position_dodge(0.1)
+pal<- c("#90CEDE", "#E64B35")
+HFD.BW.plot <- ggplot(data = HFD.BW.summary, aes(x = day, y = BW, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = BW, ymax = BW+SEM), width = .1) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  xlab("Days") + 
+  scale_y_continuous(name = "Body weight (normalized)", limits = c(0.85, 1.1), 
+                     breaks = seq(0.85, 1.10, 0.05)) +
+  scale_color_manual(values = pal, 
+                     labels=c("Control", 
+                              expression(paste(bolditalic("Calcr-Dq"))))) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust=1, size=6, face="bold"),
+        axis.line = element_line(colour="black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.x = unit(-0.005, "cm"), 
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0)) +
+  guides(col = guide_legend(title = "Treatment")) +
+  geom_text(aes(4, 1.065, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_text(aes(5, 1.065, label = "CNO", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 4, y = 1.068, xend = 4, yend = 1.053),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) +
+  geom_segment(aes(x = 5, y = 1.068, xend = 5, yend = 1.053),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black", size = 0.05) +
+  geom_signif(y_position=c(CalcrDq.signif$y + 0.012), xmin=CalcrDq.signif$day, 
+              xmax=CalcrDq.signif$day, size = 0, textsize = 1.55, parse = T, vjust = 0.4,
+              annotation=c("'5x10'^-5", "'9x10'^-11", "'3x10'^-8", "'2x10'^-7"), fontface = "bold", colour = "black")
+
+HFD.BW.plot
+```
+
+# Extended data fig. 10g
+```{r}
+# Load data
+WT.FI.acute <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_WT_NTS_acute.xlsx",
+                     rowNames=T)
+
+# Mean and SEM
+WT.FI.acute.mean <- aggregate(t(WT.FI.acute), list(gsub("[0-9]", "", colnames(WT.FI.acute))), mean,
+                     na.rm = T)
+WT.FI.acute.sem <- aggregate(t(WT.FI.acute), list(gsub("[0-9]", "", colnames(WT.FI.acute))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+WT.FI.acute.mean <- melt(WT.FI.acute.mean, id.vars = c("Group.1"))
+WT.FI.acute.sem <- melt(WT.FI.acute.sem, id.vars = c("Group.1"))
+
+WT.FI.acute.summary <- cbind(WT.FI.acute.mean, WT.FI.acute.sem$value)
+colnames(WT.FI.acute.summary) <- c("treatment", "hour", "FI", "SEM")
+WT.FI.acute.summary$treatment <- factor(WT.FI.acute.summary$treatment, 
+                                 levels = c("saline", "CNO"))
+WT.FI.acute.summary$hour <- as.numeric(as.character(WT.FI.acute.summary$hour))
+
+# Statistical testing
+WT.FI.acute.long <- WT.FI.acute
+WT.FI.acute.long$hour <- rownames(WT.FI.acute.long)
+WT.FI.acute.long <- melt(WT.FI.acute.long, id.vars = "hour")
+colnames(WT.FI.acute.long) <- c("hour", "sample", "FI")
+WT.FI.acute.long$treatment <- gsub("[0-9]", "", WT.FI.acute.long$sample)
+WT.FI.acute.long$treatment <- factor(WT.FI.acute.long$treatment, levels = c("saline", "CNO"))
+WT.FI.acute.long$hour <- factor(WT.FI.acute.long$hour)
+
+# Linear mixed effects model
+WT.FI.acute.model <- lmer(FI ~ treatment * hour + (1|sample),
+            data=WT.FI.acute.long,
+            REML=TRUE)
+
+# Least-squares means
+WT.FI.acute.model <- lsmeans(WT.FI.acute.model, pairwise ~ treatment | hour, adjust = "bonferroni")
+WT.FI.acute.model <- summary(WT.FI.acute.model$contrasts)
+
+WT.FI.acute.summary$p.adj <- NA
+WT.FI.acute.summary$p.adj[which(WT.FI.acute.summary$treatment == "CNO")] <- 
+  WT.FI.acute.model$p.value[which(WT.FI.acute.model$contrast == "saline - CNO")]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#0B775E", "#35274A")
+WT.FI.acute.plot <- ggplot(data = WT.FI.acute.summary, aes(x = hour, y = FI, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .1) +
+  geom_line(size=0.4) +
+  geom_point(size=1) +
+  scale_y_continuous(name = "Food intake (g)", limits = c(0, 1.5), 
+                     breaks = seq(0, 1.5, 0.5)) +
+  scale_x_continuous(name = "Hours", limits = c(0, 4.1),
+                     breaks = seq(0, 4, 1)) +
+  scale_color_manual(values = pal, 
+                     labels=c(expression(paste(bold("Control-"), bolditalic("Dq"), bold(" + saline"))),
+                              expression(paste(bold("Control-"), bolditalic("Dq"), bold(" + CNO"))))) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(hjust=1, face="bold", size=6),
+        axis.line = element_line(colour="black"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.x = unit(-0.005, "cm"),
+        legend.text.align = 0,
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0)) +
+  guides(col = guide_legend(title = "Treatment")) 
+  
+WT.FI.acute.plot
+```
+
+# Extended data fig. 10h
+```{r}
+# Load data
+WT.FI <- read.xlsx("/projects/mludwig/Ludwig-2021/data/DREADD/DREADD_WT_NTS.xlsx",
+                    rowNames = T)
+
+# Mean and SEM
+WT.FI.mean <- aggregate(t(WT.FI), list(gsub("[0-9]", "", colnames(WT.FI))), mean,
+                     na.rm = T)
+WT.FI.sem <- aggregate(t(WT.FI), list(gsub("[0-9]", "", colnames(WT.FI))), std.error,
+                    na.rm = T)
+
+# Prepare data for plotting
+WT.FI.mean <- melt(WT.FI.mean, id.vars = c("Group.1"))
+WT.FI.sem <- melt(WT.FI.sem, id.vars = c("Group.1"))
+
+WT.FI.summary <- cbind(WT.FI.mean, WT.FI.sem$value)
+colnames(WT.FI.summary) <- c("treatment", "hour", "FI", "SEM")
+WT.FI.summary$treatment <- factor(WT.FI.summary$treatment, 
+                                 levels = c("saline", "CNO"))
+
+
+# Statistical testing
+WT.FI.long <- WT.FI
+WT.FI.long$hour <- rownames(WT.FI.long)
+WT.FI.long <- melt(WT.FI.long, id.vars = "hour")
+colnames(WT.FI.long) <- c("hour", "sample", "FI")
+WT.FI.long$treatment <- gsub("[0-9]", "", WT.FI.long$sample)
+WT.FI.long$treatment <- factor(WT.FI.long$treatment, levels = c("saline", "CNO"))
+WT.FI.long$hour <- factor(WT.FI.long$hour)
+
+# Mixed linear effects model
+WT.FI.model <- lm(FI ~ treatment, data=WT.FI.long)
+
+# Least-squares means
+WT.FI.model <- lsmeans(WT.FI.model, pairwise ~ treatment, adjust = "bonferroni")
+WT.FI.model <- summary(WT.FI.model$contrasts)
+
+WT.FI.summary$p.adj <- NA
+WT.FI.summary$p.adj[which(WT.FI.summary$treatment == "CNO")] <- 
+  WT.FI.model$p.value[which(WT.FI.model$contrast == "saline - CNO")]
+
+# Plot
+pd <- position_dodge(0.1)
+pal <- c("#0B775E", "#35274A")
+WT.FI.plot <- ggplot(data = WT.FI.summary, aes(x = treatment, y = FI, fill = treatment)) +  
+  geom_bar(stat = "identity", position = "dodge", width = 0.5, color = "black", 
+           size = 0.3) +
+  geom_point(data = WT.FI.long, aes(x=treatment, y = FI), size = 0.3, color = "black", position = position_jitterdodge(jitter.width = 0.4)) +
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .1) +
+  scale_y_continuous(name = "Food intake (g)", limits = c(0, 5), 
+                     breaks = seq(0, 5, 0.5)) +
+  scale_fill_manual(values = pal, 
+                     labels=c(expression(paste(bold("Control-"), bolditalic("Dq"), bold(" + saline"))),
+                              expression(paste(bold("Control-"), bolditalic("Dq"), bold(" + CNO"))))) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(hjust=1, size=6, face="bold"),
+        axis.line = element_line(colour="black"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size=6, face="bold"),
+        axis.ticks.x = element_blank(),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        legend.spacing.x = unit(-0.005, "cm"),
+        legend.text.align = 0,
+        legend.key.height = unit(0.1, "cm"),
+        legend.key.width = unit(0.3, "cm"),
+        plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(0,0,-10,0)) +
+  guides(col = guide_legend(title = "Treatment"))
+  
+
+WT.FI.plot
+```
+
+# Combine all plots
+```{r}
+blank.plot <- ggplot() + geom_blank(aes(0.1,0.1)) + 
+  cowplot::theme_nothing()
+
+
+plot1 <- plot_grid(blank.plot, 
+                   chow.FI.plot + theme(plot.margin = unit(c(0, 0.2, 0.25, 0), "cm")), 
+                   chow.BW.plot + theme(plot.margin = unit(c(0, 0, 0.25, 0.2), "cm")),
+                   ncol = 3, align = "h",
+                   rel_widths = c(1,1,1), axis = "b") 
+
+plot2 <- plot_grid(HFD.FI.acute.plot + theme(plot.margin = unit(c(0, 0.2, 0.25, 0), "cm")), 
+                   HFD.FI.plot + theme(plot.margin = unit(c(0, 0.2, 0.25, 0.2), "cm")), 
+                   HFD.BW.plot + theme(plot.margin = unit(c(0, 0, 0.25, 0.2), "cm")),
+                   ncol = 3, align = "h",
+                   rel_widths = c(1, 1, 1)) 
+
+plot3 <- plot_grid(blank.plot, get_legend(WT.FI.acute.plot),
+                   get_legend(WT.FI.plot), 
+                   blank.plot,
+                   ncol = 4, align = "h", axis = "tb",
+                   rel_widths = c(0.55, 1, 1, 0.45)) 
+plot4 <- plot_grid(blank.plot, WT.FI.acute.plot + 
+                     theme(plot.margin = unit(c(0, 0.2, 0, 0), "cm"), 
+                           legend.position = "none"),
+                   WT.FI.plot + 
+                     theme(plot.margin = unit(c(0, 0, 0, 0.2), "cm"), 
+                           legend.position = "none"),
+                   blank.plot,
+                   ncol = 4, align = "h",
+                   rel_widths = c(0.5, 1, 1, 0.5)) 
+
+efig10 <-  plot_grid(plot1, plot2, plot3, plot4,
+                   ncol = 1, align = "v",
+                   rel_heights = c(1, 1, 0.2, 0.8)) 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/efigure10.png", efig10, height = 150, width = 183,
+       units = "mm")
+```
+
+# Source data extended data fig. 10
+```{r}
+source.edata10 <- list()
+
+efig10b.source <- chow.FI
+colnames(efig10b.source) <- gsub("Control", "control_", colnames(efig10b.source))
+colnames(efig10b.source) <- gsub("CalcrDq", "Calcr-Dq_", colnames(efig10b.source))
+efig10b.source <- cbind(day = as.numeric(rownames(efig10b.source)), efig10b.source)
+
+efig10c.source <- chow.BW
+colnames(efig10c.source) <- gsub("Control", "control_", colnames(efig10c.source))
+colnames(efig10c.source) <- gsub("CalcrDq", "Calcr-Dq_", colnames(efig10c.source))
+efig10c.source <- cbind(day = as.numeric(rownames(efig10c.source)), efig10c.source)
+
+efig10d.source <- HFD.FI.acute
+colnames(efig10d.source) <- gsub("Saline", "saline_", colnames(efig10d.source))
+colnames(efig10d.source) <- gsub("CNO", "CNO_", colnames(efig10d.source))
+efig10d.source <- cbind(hour = as.numeric(rownames(efig10d.source)), efig10d.source)
+
+efig10e.source <- HFD.FI
+colnames(efig10e.source) <- gsub("Control", "control_", colnames(efig10e.source))
+colnames(efig10e.source) <- gsub("CalcrDq", "Calcr-Dq_", colnames(efig10e.source))
+efig10e.source <- cbind(day = as.numeric(rownames(efig10e.source)), efig10e.source)
+
+efig10f.source <- HFD.BW
+colnames(efig10f.source) <- gsub("Control", "control_", colnames(efig10f.source))
+colnames(efig10f.source) <- gsub("CalcrDq", "Calcr-Dq_", colnames(efig10f.source))
+efig10f.source <- cbind(day = as.numeric(rownames(efig10f.source)), efig10f.source)
+
+efig10g.source <- WT.FI.acute
+colnames(efig10g.source) <- gsub("Saline", "saline_", colnames(efig10g.source))
+colnames(efig10g.source) <- gsub("CNO", "CNO_", colnames(efig10g.source))
+efig10g.source <- cbind(hour = as.numeric(rownames(efig10g.source)), efig10g.source)
+
+efig10h.source <- WT.FI
+colnames(efig10h.source) <- gsub("Saline", "saline_", colnames(efig10h.source))
+colnames(efig10h.source) <- gsub("CNO", "CNO_", colnames(efig10h.source))
+efig10h.source <- cbind(hour = as.numeric(rownames(efig10h.source)), efig10h.source)
+
+source.edata10 <- list.append(source.edata10, efig10b.source)
+source.edata10 <- list.append(source.edata10, efig10c.source)
+source.edata10 <- list.append(source.edata10, efig10d.source)
+source.edata10 <- list.append(source.edata10, efig10e.source)
+source.edata10 <- list.append(source.edata10, efig10f.source)
+source.edata10 <- list.append(source.edata10, efig10g.source)
+source.edata10 <- list.append(source.edata10, efig10h.source)
+
+
+names(source.edata10) <- c("10b", "10c", "10d", "10e", "10f", "10g", "10h")
+write.xlsx(source.edata10, file = "/projects/mludwig/Ludwig-2021/output/tables/Source_Data_Extended_Data_Fig10.xlsx",
+           rowNames = F)
+```

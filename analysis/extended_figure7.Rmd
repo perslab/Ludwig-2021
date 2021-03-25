@@ -1,0 +1,219 @@
+---
+title: "extended_figure7"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(reshape2)
+library(stats)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggraph)
+library(dplyr)
+library(igraph)
+library(WGCNA)
+library(readxl)
+library(DESeq2)
+library(gProfileR)
+library(Seurat)
+library(tidygraph)
+library(cowplot)
+library(forcats)
+library(stringr)
+```
+
+# Load data
+```{r}
+# bulk WGCNA data 
+network <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_network.rds")
+MEs <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_MEs.rds")
+expr.mat <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_exprmat.rds")
+gene.assignment <- readRDS("/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_gene_assignment.rds")
+```
+
+# Extended data fig. 7a
+```{r}
+# Compute network kme values
+kme <- signedKME(as.matrix(expr.mat), MEs, 
+                outputColumnName = substr(colnames(MEs), 1, 2))
+
+sig.modules <- c("M18", "M19", "M20")
+colors <- rev(c("#8A843E", "#73BCC9", "#CC8B93"))
+
+# Plot GO terms
+for (i in 1:length(sig.modules)) {
+  module <- sig.modules[i]
+  module.genes <- rownames(gene.assignment)[gene.assignment$module == module]
+  kmes <- kme[module.genes, module]
+  query <- hub.genes <- module.genes[order(kmes, decreasing=T)]
+  
+  module.GO.terms <- gprofiler(query = query, 
+                               organism = "mmusculus", max_set_size = 500, 
+                               src_filter = c("GO:BP", "GO:MF"), 
+                               hier_filtering = "strong",
+                               ordered_query = T, correction_method = "bonferroni", 
+                               min_isect_size = 3,
+                               significant = F, custom_bg = colnames(expr.mat))
+        
+  module.GO.terms$term.name <- gsub("transcription factor activity, RNA polymerase II proximal promoter sequence-specific DNA binding", "transcription factor activity", module.GO.terms$term.name)
+  
+  module.GO.terms %>% select(domain, term.name, p.value, overlap.size) %>% 
+    arrange(p.value) %>% top_n(5, -p.value) %>%
+    mutate(x = fct_reorder(str_to_title(str_wrap(term.name, 20)), -p.value)) %>% 
+    mutate(y = -log10(p.value)) -> GO.terms.plot
+
+  GO.plot <- ggplot(GO.terms.plot, aes(x,y)) + 
+    geom_col(colour="black", width=0.6, fill=colors[i], size=0.3,
+             position = position_dodge(width=0.5)) +
+    theme_pubr(legend="none") + 
+    theme(axis.text.x = element_text(size=6, face="bold"),
+          axis.text.y = element_text(size=6, face="bold"),
+          axis.title.x = element_text(size=6, face="bold"),
+         axis.line = element_line(colour = "black", size = 0.4)) +
+    scale_size(range = c(5,10)) + 
+    ggsci::scale_fill_lancet() +
+    coord_flip() +
+    xlab(NULL) + ylab(expression(paste(bold(-log[10]),bold("("),
+                                       bolditalic("P"),bold(")")))) 
+    
+  assign(paste0("GO.plot", i), GO.plot)
+
+
+}
+
+GO.all.plot <- plot_grid(GO.plot1, GO.plot2, GO.plot3, align="h", nrow = 1, ncol = 3)
+```
+
+# Extended data fig. 7b
+```{r}
+# Compute network adjacency
+adjacency <- adjacency(expr.mat, power = 5, corFnc = "bicor", type = "signed")
+
+# Load AP bulk RNA-seq data 
+path <- "/projects/mludwig/Ludwig-2021/data/bulk/GUS2016-142-NN_Tables.xlsx"
+sheetnames <- excel_sheets(path)
+sheets <- lapply(excel_sheets(path), read_excel, path = path)
+names(sheets) <- sheetnames
+counts <- sheets[[2]]
+idx.dup <- which(duplicated(counts$`Gene name`)) # Indices of duplicated gene names
+AP.bulk <- counts[-idx.dup, grep("AP", colnames(counts))]
+AP.bulk <- as.matrix(AP.bulk)
+rownames(AP.bulk) <- counts$`Gene name`[-idx.dup]
+
+# Differential gene expression 
+count.data <- AP.bulk[,c(grep("Semaglutide", colnames(AP.bulk)), 
+                        grep("WM", colnames(AP.bulk)))]
+
+condition <- factor(c(rep('Sema', length(grep("Semaglutide", colnames(count.data)))),
+                     rep('WM', length(grep("WM", colnames(count.data))))), 
+                   levels = c("WM", "Sema"))
+dds <- DESeqDataSetFromMatrix(count.data, DataFrame(condition), ~ condition)
+dds <- DESeq(dds)
+DEGs <- results(dds, name="condition_Sema_vs_WM") 
+
+size <- 10
+
+sig.modules <- c("M18", "M19", "M20")
+colors <- rev(c("#8A843E", "#73BCC9", "#CC8B93")) 
+
+# Plot hub genes
+for (i in 1:length(sig.modules)) {
+  
+  module <- sig.modules[i]
+
+  module.genes <- rownames(gene.assignment)[gene.assignment$module == module]
+  kmes <- kme[module.genes, module]
+  hub.genes <- module.genes[order(kmes, decreasing=T)][1:size]
+  hub.kmes <- kmes[order(kmes, decreasing=T)][1:size]
+  hub.data <- cbind.data.frame(module = rep(module, size),
+                               gene = hub.genes, kme = hub.kmes)
+
+  hub.data$logfc <- DEGs$log2FoldChange[match(hub.data$gene, rownames(DEGs))]
+  hub.data$p.adj <- DEGs$padj[match(hub.data$gene, rownames(DEGs))]
+  gene.idx <- match(hub.data$gene, colnames(expr.mat))
+
+  adjacency[gene.idx, gene.idx] %>% 
+    graph.adjacency(mode = "undirected", weighted = T, diag = FALSE) %>% 
+    as_tbl_graph() %>% upgrade_graph() %>% activate(nodes) %>%
+    dplyr::mutate(module = hub.data$module) %>%
+    dplyr::mutate(kme = hub.data$kme) %>% 
+    dplyr::mutate(abs.logfc = abs(hub.data$logfc)) %>%
+    dplyr::mutate(p.adj = hub.data$p.adj) %>% 
+    dplyr::mutate(color=factor(ifelse(p.adj < 0.05, yes = "S", no = "NS"), 
+                               levels = c("NS", "S"))) %>%
+    activate(edges) %>% dplyr::filter(weight>.15) %>% activate(nodes) %>%
+    filter(!node_is_isolated()) -> hub.plot
+  
+  if (i < length(sig.modules)) {
+        module.plot <- ggraph(hub.plot, layout = "stress") + 
+          geom_edge_link(color="darkgrey", show.legend=F, aes(alpha = weight)) + 
+          geom_node_point(aes(size = abs.logfc), fill = colors[i], shape=21, alpha=0.8,
+                          stroke = 0.4) + 
+          scale_size(limits = c(0,4), range = c(0, 8)) +
+          geom_node_text(aes(label = name), fontface="bold.italic", size=2, repel = T) +
+          theme_graph(base_family = 'Helvetica') + 
+          theme(legend.position = "none",
+                axis.text = element_blank(),
+                axis.ticks = element_blank(), 
+                axis.line=element_blank(),
+                axis.title = element_blank(),
+                # margin: top, right, bottom, and left
+                plot.margin = unit(c(0.1, 0.5, 0.1, 0.5), "cm")) +
+          coord_cartesian(clip="off")
+  }
+  else {
+    
+    module.plot <- ggraph(hub.plot, layout = "stress") + 
+      geom_edge_link(color="darkgrey", show.legend=F, aes(alpha=weight)) + 
+      geom_node_point(aes(size = abs.logfc), fill = colors[i], shape=21, alpha=0.8, stroke = 0.4) + 
+      scale_size(breaks = c(1,2), limits = c(0,4), range = c(0, 8), 
+                 labels = c(" \U00B1 1", " \U00B1 2")) +
+      geom_node_text(aes(label = name), fontface="bold.italic", size=2, repel = T) +
+      guides(size = guide_legend(override.aes = list(size=c(2,4), fill ="black"), keywidth = 0.8, 
+                                 keyheight = 0.8, order = 1, 
+                                 title = expression(bold(paste("Log"[2],~
+                                                                 "fold-change"))))) + 
+      theme_graph(base_family = 'Helvetica') + 
+      theme(legend.title.align=0.5,
+            legend.position = c(1, 0.5),
+            legend.margin = margin(0,-3,0,0, unit="cm"),
+            legend.title = element_text(size=6, face="bold"),
+            legend.text = element_text(size=6, face="bold"),
+            axis.text =element_blank(),
+            axis.ticks = element_blank(), 
+            axis.line=element_blank(),
+            axis.title = element_blank(),
+            # margin: top, right, bottom, and left
+            plot.margin = unit(c(0.1, 3, 0.1, 0.5), "cm")) +
+      coord_cartesian(clip="off")
+  }
+  
+  assign(paste0("module.plot", i), module.plot)
+
+}
+
+network.plot <- plot_grid(module.plot1, module.plot2, module.plot3, 
+                          align = "h", nrow = 1, ncol = 3,
+          rel_widths = c(rep(1, 2), 1.4))
+```
+
+# Combine plots
+```{r}
+blank.plot <- ggplot() + geom_blank(aes(0.1,0.1)) + 
+  cowplot::theme_nothing()
+
+plot1 <- plot_grid(GO.all.plot, blank.plot,
+                   ncol = 2, align = "h", rel_widths = c(1, 0.2))
+efig7 <-  plot_grid(plot1,
+                    network.plot,
+                    ncol = 1, align = "v",
+                    rel_heights = c(1, 0.8)) 
+
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/efigure7.png", efig7, height = 80, width = 183,
+       units = "mm")
+```

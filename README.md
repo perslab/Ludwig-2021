@@ -1,1 +1,5 @@
-# Ludwig-2021
+# A genetic map of the mouse dorsal vagal complex and its role in obesity
+
+**Abstract**
+The brainstem dorsal vagal complex (DVC) is known to regulate energy balance and is the target of appetite-suppressing hormones, such as glucagon-like peptide 1 (GLP-1). Here we provide a comprehensive genetic map of the DVC andidentify neuronal populations that control feeding. Combining bulk and single-nucleus gene expression and chromatin profiling of DVC cells, we reveal 25 neuronal populations with unique transcriptional and chromatin accessibility landscapes and peptide receptor expression profiles. GLP-1 receptor (GLP-1R) agonist administration induces gene expression alterations specific to two distinct sets of
+Glp1r neurons — one population in the area postrema and one inthe nucleus of the solitary tract that also expresses calcitonin receptor (Calcr). Transcripts and regions of accessible chromatin near obesity-associated genetic variants are enriched in the area postrema and the nucleus of the solitary tract neurons that express Glp1r and/or Calcr, and activating several of these neuronal populations decreases feeding in rodents. Thus, DVC neuronal populations associated with obesity predisposition suppress feeding and may represent therapeutic targets for obesity.

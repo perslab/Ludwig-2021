@@ -157,4 +157,3 @@ saveRDS(MEs, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_MEs.r
 saveRDS(gene.assignment, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_gene_assignment.rds")
 saveRDS(colors, file = "/projects/mludwig/Ludwig-2021/output/WGCNA/WGCNA_bulk_colors.rds")
 ```
-

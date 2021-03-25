@@ -1,0 +1,298 @@
+---
+title: "extended_figure1"
+author: "Mette Ludwig"
+date: "2021-02-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(openxlsx)
+library(readxl)
+library(ggplot2)
+library(ggpubr)
+library(plotrix)
+library(reshape2)
+library(lme4)
+library(emmeans)
+library(cowplot)
+library(rlist)
+```
+
+# Load data
+```{r}
+# Body weight
+BW.data <- read_xlsx("/projects/mludwig/Ludwig-2021/data/single-nuclues/BW_sn.xlsx", col_names = T)
+BW.data <- as.data.frame(BW.data)
+rownames(BW.data) <- BW.data[,1]
+BW.data <- BW.data[, -1]
+BW.data <- BW.data[-c(1:3),]
+BW.data <- BW.data[,!(colnames(BW.data) %in% c(1, 2, 18, 35))]
+
+# Food intake
+FI.data <- read_xlsx("/projects/mludwig/Ludwig-2021/data/single-nuclues/FI_sn.xlsx", col_names = T)
+FI.data <- as.data.frame(FI.data)
+rownames(FI.data) <- FI.data[,1]
+FI.data <- FI.data[, -1]
+FI.data <- FI.data[-c(1:3),]
+FI.data <- FI.data[,!(colnames(FI.data) %in% c(1, 2, 18, 35))]
+
+# Treatment groups
+groups <- data.frame(treatment = c(rep("Vehicle", 9), rep("Semaglutide", 9), rep("Weight-matched", 8)))
+rownames(groups) <- colnames(BW.data)
+```
+
+# Extended data fig. 1a
+```{r}
+# Mean and SEM
+BW.mean <- aggregate(t(BW.data), list(groups$treatment), mean, na.rm = T)
+BW.sem <- aggregate(t(BW.data), list(groups$treatment), std.error, na.rm = T)
+
+# Prepare data for plotting
+BW.mean <- melt(BW.mean, id.vars = c("Group.1"))
+BW.sem <- melt(BW.sem, id.vars = c("Group.1"))
+
+BW.summary <- cbind(BW.mean, BW.sem$value)
+colnames(BW.summary) <- c("treatment", "day", "BW", "SEM")
+
+BW.summary$treatment <- factor(BW.summary$treatment, levels = c("Semaglutide",
+                                                          "Weight-matched", "Vehicle"))
+
+
+# Statistical testing
+BW.long <- BW.data
+BW.long <- melt(cbind(day=rownames(BW.long), BW.long), id.vars = "day")
+colnames(BW.long) <- c("day", "sample", "BW")
+BW.long$treatment <- groups$treatment[match(BW.long$sample, rownames(groups))]
+BW.long$treatment <- factor(BW.long$treatment, 
+                              levels = c("Vehicle", "Weight-matched", "Semaglutide"))
+BW.long$day <- factor(BW.long$day)
+
+# Linear mixed effects model
+BW.model <- lmer(BW ~ treatment * day + (1|sample),
+            data=BW.long,
+            REML=TRUE)
+# Least-squares means
+BW.model <- lsmeans(BW.model, pairwise ~ treatment | day, adjust = "bonferroni")
+BW.model <- summary(BW.model$contrasts)
+
+
+BW.summary$p.adj <- NA
+BW.summary$p.adj[which(BW.summary$treatment == "Weight-matched")] <- 
+  BW.model$p.value[which(BW.model$contrast == "Vehicle - (Weight-matched)")]
+BW.summary$p.adj[which(BW.summary$treatment == "Semaglutide")] <- 
+  BW.model$p.value[which(BW.model$contrast == "Vehicle - Semaglutide")]
+
+BW.summary$p.symbol <- ""
+BW.summary$p.symbol[which(BW.summary$p.adj < 0.05)] <- "*"
+BW.summary$p.symbol[which(BW.summary$p.adj < 0.01)] <- "**"
+BW.summary$p.symbol[which(BW.summary$p.adj < 0.001)] <- "***"
+
+# Asterisk position 
+position <- c()
+for (i in (unique(BW.summary$day))) {
+  position <- c(position, max(BW.summary$BW[BW.summary$day == i] + BW.summary$SEM[BW.summary$day == i]))
+}
+position <- data.frame(day = unique(BW.summary$day), y = position)
+
+sema.signif <- BW.summary[which(BW.summary$treatment == "Semaglutide" & BW.summary$p.symbol != ""),]
+sema.signif$y <- position$y[which(position$day %in% sema.signif$day)]
+
+WM.signif <- BW.summary[which(BW.summary$treatment == "Weight-matched" & BW.summary$p.symbol != ""),]
+WM.signif$y <- position$y[which(position$day %in% WM.signif$day)]
+
+# Colors
+pal <- c("#C27D38", "#CCC591", "#BFBFBA", "#58635F")
+
+# Plot
+pd <- position_dodge(0.1)
+BW.plot <- ggplot(data = BW.summary, aes(x = day, y = BW, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = BW, ymax = BW+SEM), width = .1) +
+  geom_line(size = 0.4) +
+  geom_point(size = 1) +
+  xlab("Days") + 
+  scale_y_continuous(name = "Body weight (g)", limits = c(35, 52), 
+                     breaks = seq(35, 55, 5)) +
+  scale_color_manual(values = pal) +
+  theme_pubr(legend = "top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(size=6, hjust = 1, face = "bold"),
+        axis.line = element_line(colour = "black"),
+        axis.title = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(),
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  guides(col = guide_legend(title = "Treatment", nrow=1, byrow = T)) +
+  geom_text(aes(4, 51, label = "1st dosis", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 4, y = 51, xend = 4, yend = 49.5),
+                arrow = arrow(length = unit(0.08, "cm")), 
+               show.legend = F, colour = "black",
+               size = 0.05) +
+  geom_signif(y_position=c(WM.signif$y + 2), xmin=WM.signif$day, 
+              xmax=WM.signif$day, size = 0, textsize = 2,
+              annotation=WM.signif$p.symbol, fontface = "bold", colour = "#BFBFBA") +
+  geom_signif(y_position=c(sema.signif$y + 1), xmin=sema.signif$day, 
+              xmax=sema.signif$day, size = 0, textsize = 2,
+              annotation=sema.signif$p.symbol, fontface = "bold", colour = "#C27D38") 
+
+BW.plot
+```
+
+# Extended data fig. 1b
+```{r}
+# Mean and SEM
+FI.mean <- aggregate(t(FI.data), list(groups$treatment), mean, na.rm = T)
+FI.sem <- aggregate(t(FI.data), list(groups$treatment), std.error, na.rm = T)
+
+# Prepare data for plotting
+FI.mean <- melt(FI.mean, id.vars = c("Group.1"))
+FI.sem <- melt(FI.sem, id.vars = c("Group.1"))
+
+FI.summary <- cbind(FI.mean, FI.sem$value)
+colnames(FI.summary) <- c("treatment", "day", "FI", "SEM")
+
+FI.summary$treatment <- factor(FI.summary$treatment, levels = c("Semaglutide",
+                                                          "Weight-matched", "Vehicle"))
+
+# Statistical testing
+FI.long <- FI.data
+FI.long$day <- rownames(FI.long)
+FI.long <- melt(FI.long, id.vars = "day")
+colnames(FI.long) <- c("day", "sample", "FI")
+FI.long$treatment <- groups$treatment[match(FI.long$sample, rownames(groups))]
+FI.long$treatment <- factor(FI.long$treatment, 
+                              levels = c("Vehicle", "Weight-matched", "Semaglutide", "Liraglutide"))
+FI.long$day <- factor(FI.long$day)
+
+# Linear mixed effects model
+FI.model <- lmer(FI ~ treatment * day + (1|sample),
+            data=FI.long,
+            REML=TRUE)
+# Least-squares means
+FI.model <- lsmeans(FI.model, pairwise ~ treatment | day, adjust = "bonferroni")
+FI.model <- summary(FI.model$contrasts)
+
+FI.summary$p.adj <- NA
+FI.summary$p.adj[which(FI.summary$treatment == "Weight-matched")] <- 
+  FI.model$p.value[which(FI.model$contrast == "Vehicle - (Weight-matched)")]
+FI.summary$p.adj[which(FI.summary$treatment == "Semaglutide")] <- 
+  FI.model$p.value[which(FI.model$contrast == "Vehicle - Semaglutide")]
+
+FI.summary$p.symbol <- ""
+FI.summary$p.symbol[which(FI.summary$p.adj < 0.05)] <- "*"
+FI.summary$p.symbol[which(FI.summary$p.adj < 0.01)] <- "**"
+FI.summary$p.symbol[which(FI.summary$p.adj < 0.001)] <- "***"
+
+
+FI.summary$p.adj2 <- NA
+FI.summary$p.adj2[which(FI.summary$treatment == "Semaglutide")] <- 
+  FI.model$p.value[which(FI.model$contrast == "(Weight-matched) - Semaglutide")]
+
+FI.summary$p.symbol2 <- ""
+FI.summary$p.symbol2[which(FI.summary$p.adj2 < 0.05)] <- "#"
+FI.summary$p.symbol2[which(FI.summary$p.adj2 < 0.01)] <- "##"
+FI.summary$p.symbol2[which(FI.summary$p.adj2 < 0.001)] <- "###"
+
+
+# Asterisk position
+position1 <- c()
+for (i in (unique(FI.summary$day))) {
+  position1 <- c(position1, max(FI.summary$FI[FI.summary$day == i] + FI.summary$SEM[FI.summary$day == i]))
+}
+position1 <- data.frame(day = unique(FI.summary$day), y = position1)
+
+sema.signif <- FI.summary[which(FI.summary$treatment == "Semaglutide" & FI.summary$p.symbol != ""),]
+sema.signif$y <- position1$y[which(position1$day %in% sema.signif$day)]
+
+WM.signif <- FI.summary[which(FI.summary$treatment == "Weight-matched" & FI.summary$p.symbol != ""),]
+WM.signif$y <- position1$y[which(position1$day %in% WM.signif$day)]
+
+position2 <- c()
+for (i in (unique(FI.summary$day))) {
+  position2 <- c(position2, max(FI.summary$FI[FI.summary$day == i & FI.summary$treatment != "Vehicle"] + 
+                                  FI.summary$SEM[FI.summary$day == i & FI.summary$treatment != "Vehicle"]))
+}
+position2 <- data.frame(day = unique(FI.summary$day), y = position2)
+
+sema.signif2 <- FI.summary[which(FI.summary$treatment == "Semaglutide" & FI.summary$p.symbol2 != ""),]
+sema.signif2$y <- position2$y[which(position2$day %in% sema.signif2$day)]
+
+# Colors
+pal <- c("#C27D38", "#CCC591", "#BFBFBA", "#58635F")
+
+# Plot
+pd <- position_dodge(0.1)
+FI.plot <- ggplot(data = FI.summary, aes(x = day, y = FI, col = treatment, group = treatment)) +  
+  geom_errorbar(aes(ymin = FI, ymax = FI+SEM), width = .2) +
+geom_line(size = 0.4) +
+  geom_point(size = 1) +
+  xlab("Days") +
+  scale_y_continuous(name = "Food intake (g)", limits = c(0, 5), 
+                     breaks = seq(0, 5, 1)) +
+  scale_color_manual(values = pal) +
+  theme_pubr(legend="top") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.text = element_text(size = 6, hjust = 1, face = "bold"),
+        axis.line = element_line(colour = "black"),
+        axis.title = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6, face="bold"),
+        legend.title = element_blank(), 
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+  guides(col = guide_legend(title = "Treatment", nrow=1, byrow = T)) +
+  geom_text(aes(3, 4.6, label = "1st dosis", vjust = -1), 
+            colour = "black", size = 2, show.legend = F) +
+  geom_segment(aes(x = 3, y = 4.5, xend = 3, yend = 4.1), show.legend = F,
+                  arrow = arrow(length = unit(0.08, "cm")), colour = "black",
+               size = 0.05) +
+  geom_signif(y_position=c(WM.signif$y + 0.35), xmin=WM.signif$day, 
+              xmax=WM.signif$day, size = 0, textsize = 2,
+              annotation=WM.signif$p.symbol, fontface = "bold", colour = "#BFBFBA") +
+  geom_signif(y_position=c(sema.signif$y + 0.15), xmin=sema.signif$day, 
+              xmax=sema.signif$day, size = 0, textsize = 2,
+              annotation=sema.signif$p.symbol, fontface = "bold", colour = "#C27D38") +
+  geom_signif(y_position=c(sema.signif2$y + 0.15), xmin=sema.signif2$day, 
+              xmax=sema.signif2$day, size = 0, textsize = 2,
+              annotation=sema.signif2$p.symbol2, fontface = "bold", colour = "#C27D38") 
+FI.plot
+```
+
+```{r}
+efig1 <-  plot_grid(BW.plot + theme(plot.margin = unit(c(0, 0.1, 0, 0), "cm")),
+                    FI.plot  + theme(plot.margin = unit(c(0, 0, 0, 0.1), "cm")),
+                    ncol = 2, align = "h",
+                   rel_widths = c(1, 1)) 
+efig1
+ggsave("/projects/mludwig/Ludwig-2021/output/figures/efigure1.png", efig1, height = 80, width = 183,
+       units = "mm")
+```
+
+# Source data extended data fig.1
+```{r}
+source.edata1 <- list()
+
+efig1a.source <- BW.data
+colnames(efig1a.source) <- paste0(groups$treatment, "_", rownames(groups))  
+colnames(efig1a.source) <- gsub("Semaglutide", "semaglutide", colnames(efig1a.source))
+colnames(efig1a.source) <- gsub("Weight-matched", "WM", colnames(efig1a.source))
+colnames(efig1a.source) <- gsub("Vehicle", "vehicle", colnames(efig1a.source))
+efig1a.source <- cbind(day = as.numeric(rownames(efig1a.source)), efig1a.source)
+
+source.edata1 <- list.append(source.edata1, efig1a.source)
+
+efig1b.source <- FI.data
+colnames(efig1b.source) <- paste0(groups$treatment, "_", rownames(groups))  
+colnames(efig1b.source) <- gsub("Semaglutide", "semaglutide", colnames(efig1b.source))
+colnames(efig1b.source) <- gsub("Weight-matched", "WM", colnames(efig1b.source))
+colnames(efig1b.source) <- gsub("Vehicle", "vehicle", colnames(efig1b.source))
+efig1b.source <- cbind(day = as.numeric(rownames(efig1b.source)), efig1b.source)
+source.edata1 <- list.append(source.edata1, efig1b.source)
+
+names(source.edata1) <- c("1a", "1b")
+write.xlsx(source.edata1, 
+           file = "/projects/mludwig/Ludwig-2021/output/tables/Source_Data_Extended_Data_Fig1.xlsx",
+           rowNames = F)
+```
